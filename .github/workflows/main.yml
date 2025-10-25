@@ -1,0 +1,120 @@
+# SHADOWHACKER-GOD: RDP Workflow (Final Working Windows with Persistence)
+
+name: AEON-WIN-PERSISTENT-RDP-FIXED
+
+on:
+  # الجدولة: لإعادة التشغيل التلقائي كل 6 ساعات
+  schedule:
+    - cron: '0 */6 * * *' 
+    
+  # التشغيل اليدوي
+  workflow_dispatch: 
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    # نستخدم 360 دقيقة (الحد الأقصى لـ GitHub) بدلاً من 3600
+    timeout-minutes: 360 
+    
+    steps:
+    - uses: actions/checkout@v3
+
+    # 1. إعداد المتغيرات السرية والبيئة (الأسرار والمسارات)
+    - name: Setup Secrets and Environment Variables
+      run: |
+        echo "GIST_TOKEN=${{ secrets.GIST_PAT }}" | Out-File -FilePath $env:GITHUB_ENV -Append
+        echo "RDP_PASS=${{ secrets.RDP_PASSWORD }}" | Out-File -FilePath $env:GITHUB_ENV -Append
+        # اسم المستخدم سيكون "TOOLBOXLAP" كما في سكريبتك
+        echo "RDP_USER=TOOLBOXLAP" | Out-File -FilePath $env:GITHUB_ENV -Append
+        echo "TAILSCALE_KEY=${{ secrets.TAILSCALE_AUTH_KEY }}" | Out-File -FilePath $env:GITHUB_ENV -Append
+        echo "PERSISTENT_DIR=C:\Users\TOOLBOXLAP\PersistentData" | Out-File -FilePath $env:GITHUB_ENV -Append
+      shell: powershell
+
+    # 2. تثبيت مكتبة requests (لعمليات Gist)
+    - name: Install Python Libraries for Gist Access
+      run: pip install requests
+      shell: cmd
+
+    # 3. استعادة البيانات الدائمة من Gist
+    - name: Restore Persistent Data from Gist
+      run: |
+        mkdir $env:PERSISTENT_DIR -Force
+        python ./scripts/restore_data.py ${{ secrets.GIST_ID }} $env:GIST_TOKEN $env:PERSISTENT_DIR
+      shell: pwsh
+
+    # 4. تثبيت Tailscale (باستخدام نهجك الناجح)
+    - name: Install Tailscale (Reliable Method)
+      run: |
+        # استخدام رابط MSI مُحدَّد وثابت لتقليل مشاكل الـ 404
+        # يمكنك تغيير هذا الرابط لنسخة أحدث إذا لزم الأمر
+        $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi" 
+        $installerPath = "$env:TEMP\tailscale.msi"
+
+        # الآن نستخدم Invoke-WebRequest مع تثبيت MSI كما في سكريبتك القديم
+        Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+        Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+        Remove-Item $installerPath -Force
+      shell: powershell
+
+    # 5. تكوين RDP و إنشاء المستخدم
+    - name: Configure RDP User and Set Password
+      run: |
+        $password = $env:RDP_PASS
+        $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+        
+        # إنشاء المستخدم TOOLBOXLAP وتعيين كلمة المرور من Secrets
+        if (-not (Get-LocalUser -Name "$env:RDP_USER" -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name "$env:RDP_USER" -Password $securePass -AccountNeverExpires
+        }
+        
+        Add-LocalGroupMember -Group "Administrators" -Member "$env:RDP_USER"
+        Add-LocalGroupMember -Group "Remote Desktop Users" -Member "$env:RDP_USER"
+        
+        # إعدادات RDP الأساسية
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+        Restart-Service -Name TermService -Force
+      shell: powershell
+
+    # 6. توصيل Tailscale والحصول على IP
+    - name: Establish Tailscale Connection & Get IP
+      run: |
+        & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$env:TAILSCALE_KEY --hostname=AEON-RDP-WIN-$env:GITHUB_RUN_ID
+        $tsIP = $null
+        $retries = 0
+        while (-not $tsIP -and $retries -lt 10) {
+            $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+            Start-Sleep -Seconds 5
+            $retries++
+        }
+        if (-not $tsIP) {
+            Write-Error "Tailscale IP not assigned. Exiting."
+            exit 1
+        }
+        echo "RDP_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Append
+      shell: powershell
+
+    # 7. طباعة بيانات الاتصال
+    - name: Display Connection Details
+      run: |
+        Write-Host "--------------------------------------------------------"
+        Write-Host "          SHADOWHACKER-GOD: WINDOWS RDP CONNECTION          "
+        Write-Host "--------------------------------------------------------"
+        Write-Host "RDP Status: RDP and Tailscale are active."
+        Write-Host "Username:   $env:RDP_USER"
+        Write-Host "Password:   ${{ secrets.RDP_PASSWORD }}" 
+        Write-Host "Tailscale IP: $env:RDP_IP"
+        Write-Host "--------------------------------------------------------"
+      shell: powershell
+
+    # 8. حلقة الحفظ والإغلاق (لضمان الحفظ قبل تدمير الخادم)
+    - name: Keep Alive and Data Sync Loop
+      run: |
+        # الانتظار لمدة 359 دقيقة (5 ساعات و 59 دقيقة)
+        Start-Sleep -Seconds 21540 
+        Write-Host "Maximum time approaching. Executing data save..."
+        
+        # **خطوة الحفظ الحاسمة**
+        python ./scripts/save_data.py ${{ secrets.GIST_ID }} $env:GIST_TOKEN $env:PERSISTENT_DIR
+        
+        Write-Host "Data saved successfully. RDP session shutting down. Auto-restart imminent."
+      shell: powershell
