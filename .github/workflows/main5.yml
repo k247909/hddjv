@@ -1,6 +1,6 @@
 # SHADOWHACKER-GOD: RDP Workflow (Final Fixed Code: Encoding Error Solved)
 
-name: RDP2
+name: RDP-SECONDS 
 
 on:
   schedule:
