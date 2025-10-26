@@ -66,6 +66,7 @@ jobs:
         Write-Host "Authenticating Tailscale with Hostname: $runnerHostname"
         & "C:\Program Files\Tailscale\tailscale.exe" up --authkey $tsAuthKey --hostname $runnerHostname --accept-routes --reset
         
+        # انتظار واسترجاع IP
         $tsIP = $null
         $retries = 0
         while (-not $tsIP -and $retries -lt 15) {
@@ -125,11 +126,10 @@ jobs:
         $exe = $env:RUSTDESK_EXE
         if (-not (Test-Path $exe)) { Write-Error "rustdesk.exe missing: $exe"; exit 1 }
 
-        # === التعديل هنا: استخدام & لتشغيل مباشر مع تجاهل الإخراج ===
+        # استخدام & لتشغيل مباشر مع تجاهل الإخراج (لحل مشكلة Flutter Input Redirection)
         Write-Host "Attempting to install service..."
         & $exe --install-service 2>$null
         Start-Sleep -Seconds 5
-        # === نهاية التعديل ===
         
         $svcNameCandidates = @("RustDesk","rustdesk")
         $foundSvc = $null
@@ -184,7 +184,6 @@ jobs:
             
             # Try 2: Fallback to CLI --get-id
             try {
-                # استخدام 2>$null لتجاهل رسائل Flutter/Dart غير الهامة
                 $cliOut = & $exe --get-id 2>$null
                 if ($cliOut -match '(\d{6,12})') {
                     $id = $cliOut.Trim()
@@ -239,3 +238,4 @@ jobs:
         }
         
         Write-Host "Shutting down runner."
+      
