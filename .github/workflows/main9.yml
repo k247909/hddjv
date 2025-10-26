@@ -1,0 +1,137 @@
+# SHADOWHACKER-GOD: RDP Workflow (Final Code: RustDesk Unattended Access)
+
+name: AEON-RDP-RUSTDESK-ONLY
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+    - uses: actions/checkout@v3
+    
+    # 1. إعداد المتغيرات السرية والبيئة
+    - name: Setup Secrets and Environment Variables
+      run: |
+        Write-Host "--- Loading Environment Variables and Secrets ---"
+        echo "RUSTDESK_PASS=${{ secrets.RUSTDESK_PASSWORD }}" | Out-File -FilePath $env:GITHUB_ENV -Append
+        echo "PERSISTENT_DIR=C:\Users\runneradmin\PersistentData" | Out-File -FilePath $env:GITHUB_ENV -Append
+        echo "GIST_TOKEN=${{ secrets.GIST_TOKEN }}" | Out-File -FilePath $env:GITHUB_ENV -Append
+        echo "GIST_ID=${{ secrets.GIST_ID }}" | Out-File -FilePath $env:GITHUB_ENV -Append
+      shell: powershell
+
+    # 2. تثبيت Python (لحفظ/استعادة البيانات)
+    - name: Install Python Libraries for Gist Access
+      run: pip install requests
+      shell: cmd
+
+    # 3. استعادة البيانات الدائمة
+    - name: Restore Persistent Data from Gist
+      run: |
+        mkdir $env:PERSISTENT_DIR -Force
+        # سنستخدم هذه الخطوة لاستعادة RustDesk ID إذا كان موجودًا
+        python ./scripts/restore_data.py $env:GIST_ID $env:GIST_TOKEN $env:PERSISTENT_DIR
+      shell: pwsh
+
+    # 4. تثبيت RustDesk بصمت
+    - name: Install RustDesk Silently
+      id: install_rustdesk
+      run: |
+        Write-Host "=== Installing RustDesk ==="
+        $rdUrl = "https://github.com/rustdesk/rustdesk/releases/download/1.2.6/rustdesk-1.2.6-x86_64.exe" # استخدم أحدث إصدار متاح
+        $installerPath = "$env:TEMP\rustdesk_install.exe"
+        $installDir = "$env:ProgramFiles\RustDesk"
+        
+        # تنزيل الملف التنفيذي
+        Invoke-WebRequest -Uri $rdUrl -OutFile $installerPath
+
+        # تثبيت صامت (مع تثبيت الخدمة للوصول غير المراقب)
+        Start-Process $installerPath -ArgumentList "--silent-install" -Wait
+        
+        # تحديد المسار التنفيذي لـ RustDesk
+        echo "RUSTDESK_EXE=$installDir\rustdesk.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+        
+        Write-Host "RustDesk Installation Complete."
+      shell: powershell
+
+    # 5. تكوين RustDesk (تعيين كلمة المرور الدائمة والحصول على الـ ID)
+    - name: Configure RustDesk & Get ID
+      run: |
+        Write-Host "=== Configuring RustDesk Unattended Access ==="
+        $rustdeskExe = $env:RUSTDESK_EXE
+        $rdPass = $env:RUSTDESK_PASS
+        
+        # 5.1 تعيين كلمة المرور الدائمة (Unattended Password)
+        Write-Host "Setting permanent password..."
+        # نحتاج إلى تشغيل الأمر كخدمة، قد نحتاج إلى إعادة تشغيل الخدمة ليعمل
+        Stop-Service -Name "RustDesk" -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 3
+        # يتم استخدام --password لتعيين كلمة المرور غير المراقبة
+        & $rustdeskExe --password $rdPass
+        Start-Sleep -Seconds 5
+        Start-Service -Name "RustDesk" -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 5
+
+        # 5.2 الحصول على الـ ID عبر سطر الأوامر
+        Write-Host "Retrieving RustDesk ID..."
+        $rdID = & $rustdeskExe --get-id
+        
+        if (-not $rdID) {
+            Write-Error "CRITICAL: Failed to retrieve RustDesk ID using --get-id. Trying config file fallback."
+            # محاولة قراءة ID من ملف التكوين (موقع النظام)
+            $configPath = "C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk.toml"
+            if (Test-Path $configPath) {
+                $fileContent = Get-Content $configPath | Select-String -Pattern "id\s*=\s*'(\d+)'"
+                if ($fileContent) {
+                    $rdID = $fileContent.Matches.Groups[1].Value
+                    Write-Host "ID retrieved from TOML file: $rdID"
+                }
+            }
+        }
+
+        if (-not $rdID) {
+            Write-Error "CRITICAL: RustDesk ID could not be determined. Access will fail."
+            exit 1
+        }
+        
+        # حفظ الـ ID في متغير البيئة وسجله في ملف مؤقت للحفظ في Gist
+        echo "RUSTDESK_ID=$rdID" | Out-File -FilePath $env:GITHUB_ENV -Append
+        "$rdID" | Out-File -FilePath "$env:PERSISTENT_DIR\rustdesk_id.txt" -Force
+
+        Write-Host "RustDesk ID: $rdID"
+        Write-Host "=== Configuration Complete ==="
+      shell: powershell
+      
+    # 6. طباعة بيانات الاتصال النهائية
+    - name: Display Connection Details
+      run: |
+        Write-Output "--------------------------------------------------------"
+        Write-Output "          SHADOWHACKER-GOD: RUSTDESK CONNECTION          "
+        Write-Output "--------------------------------------------------------"
+        Write-Output "      - RustDesk ID (للاتصال): $env:RUSTDESK_ID"
+        Write-Output "      - Password (كلمة المرور الدائمة): ${{ secrets.RUSTDESK_PASSWORD }}"
+        Write-Output "--------------------------------------------------------"
+        Write-Output "   *استخدم هذا الـ ID وكلمة المرور في تطبيق RustDesk على جهازك المحلي للاتصال.* "
+        Write-Output "--------------------------------------------------------"
+      shell: powershell
+
+    # 7. حلقة الحفظ والإغلاق (Keep Alive)
+    - name: Final Keep Alive Loop (340 minutes total)
+      run: |
+        # الانتظار للوقت المتبقي من مدة سير العمل
+        Start-Sleep -Seconds 21000 
+        
+        Write-Host "--- Executing final data save to Gist (5h 50m mark) ---"
+        # نقوم بحفظ الـ ID في Gist ليكون متاحًا في الجولة التالية إذا لزم الأمر
+        python ./scripts/save_data.py $env:GIST_ID $env:GIST_TOKEN $env:PERSISTENT_DIR
+        
+        # إيقاف الخدمة قبل إغلاق runner
+        Stop-Service -Name "RustDesk" -ErrorAction SilentlyContinue
+        
+        Write-Host "Data saved successfully. Shutting down. Auto-restart imminent."
+      shell: powershell
