@@ -17,7 +17,7 @@ jobs:
 
     # 1. إعداد المتغيرات السرية والبيئة
     - name: Setup environment variables
-      shell: powershell # هنا يتم تعريف الـ shell
+      shell: powershell
       run: |
         Write-Host "--- Loading Environment Variables and Secrets ---"
         echo "RUSTDESK_PASS=${{ secrets.RUSTDESK_PASSWORD }}" | Out-File -FilePath $env:GITHUB_ENV -Append
@@ -54,7 +54,11 @@ jobs:
             exit 0
         }
         
-        Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup.exe" -OutFile "$env:TEMP\tailscale-setup.exe"
+        # === التعديل الهام: تحديث رابط التحميل ===
+        Write-Host "Downloading Tailscale from updated link..."
+        Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "$env:TEMP\tailscale-setup.exe"
+        # === نهاية التعديل ===
+        
         Start-Process "$env:TEMP\tailscale-setup.exe" -ArgumentList "/S" -Wait
         
         Write-Host "Authenticating Tailscale..."
