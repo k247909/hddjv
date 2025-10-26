@@ -1,6 +1,6 @@
 # SHADOWHACKER-GOD: RDP Workflow (Final Fixed Code: YAML Syntax Error Solved)
 
-name: AEON-RDP-TAILSCALE-ANYDESK
+name: AEON-RDP
 
 on:
   schedule:
