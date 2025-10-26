@@ -118,7 +118,7 @@ jobs:
         echo "RUSTDESK_EXE=$rustdeskExe" | Out-File -FilePath $env:GITHUB_ENV -Append
         Write-Host "Detected rustdesk.exe at: $rustdeskExe"
 
-    # 6. التأكد من تشغيل الخدمة (إصلاح مشكلة Input Redirection)
+    # 6. التأكد من تشغيل الخدمة (مع انتظار أطول)
     - name: Ensure RustDesk service installed & running
       shell: pwsh
       run: |
@@ -126,10 +126,12 @@ jobs:
         $exe = $env:RUSTDESK_EXE
         if (-not (Test-Path $exe)) { Write-Error "rustdesk.exe missing: $exe"; exit 1 }
 
-        # استخدام & لتشغيل مباشر مع تجاهل الإخراج (لحل مشكلة Flutter Input Redirection)
+        # محاولة تثبيت الخدمة
         Write-Host "Attempting to install service..."
         & $exe --install-service 2>$null
-        Start-Sleep -Seconds 5
+        
+        # انتظار 15 ثانية لتهيئة الخدمة
+        Start-Sleep -Seconds 15 
         
         $svcNameCandidates = @("RustDesk","rustdesk")
         $foundSvc = $null
@@ -147,7 +149,7 @@ jobs:
             Write-Host "Service final status: $(Get-Service -Name $foundSvc.Name | Select-Object -ExpandProperty Status)"
         }
 
-    # 7. تكوين RustDesk واسترجاع ID
+    # 7. تكوين RustDesk واسترجاع ID (تطبيق تصفير الـ ID لضمان التوليد)
     - name: Configure RustDesk Unattended Access and Retrieve ID (Robust)
       shell: pwsh
       run: |
@@ -155,29 +157,62 @@ jobs:
         $exe = $env:RUSTDESK_EXE
         $pass = $env:RUSTDESK_PASS
         $persistDir = $env:PERSISTENT_DIR
+        $serviceConfigPath = "C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk.toml"
 
         # 1) Set permanent password
         Write-Host "Setting permanent password (CLI)..."
         & $exe --password $pass 2>&1 | Write-Host
         Start-Sleep -Seconds 8
+        
+        # === الخطوة الجديدة: تصفير الـ ID لضمان توليد ID جديد في بيئة CI ===
+        if (Test-Path $serviceConfigPath) {
+            Write-Host "Found TOML config. Forcing ID regeneration by setting id = '0'."
+            # قراءة المحتوى
+            $content = Get-Content -Path $serviceConfigPath -Raw -ErrorAction SilentlyContinue
+
+            # تعديل قيمة id إلى '0'. نستخدم -Raw لضمان التعامل مع الملف بالكامل.
+            $newContent = $content -replace "id\s*=\s*'.*?'", "id = '0'"
+            
+            # إذا لم يتم العثور على id، نضيفه في بداية [options] (أقل احتمالا)
+            if ($content -eq $newContent -and $newContent -match '\[options\]') {
+                $newContent = $newContent -replace '\[options\]', "[options]`nid = '0'"
+            }
+            
+            # الكتابة فوق الملف.
+            $newContent | Out-File -FilePath $serviceConfigPath -Encoding UTF8 -Force
+            
+            Write-Host "Restarting service to force new ID generation..."
+            try { Stop-Service -Name RustDesk -ErrorAction SilentlyContinue } catch {}
+            Start-Sleep -Seconds 5
+            try { Start-Service -Name RustDesk -ErrorAction SilentlyContinue } catch {}
+            Start-Sleep -Seconds 15
+        } else {
+            Write-Warning "TOML config not found yet. Skipping ID force regeneration, relying on service start."
+        }
+        # === نهاية خطوة التصفير ===
+
 
         # 2) Wait for ID by checking Service Config and CLI
-        $serviceConfigPath = "C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk.toml"
         $id = $null
         $attempts = 0
-        $maxAttempts = 90
+        $maxAttempts = 240 # 20 minutes (4 times the previous failed limit)
         
         Write-Host "Waiting for ID by checking TOML config and CLI..."
         
         while (-not $id -and $attempts -lt $maxAttempts) {
+            
             # Try 1: Check the Service's TOML config file
             if (Test-Path $serviceConfigPath) {
                 try {
                     $content = Get-Content -Path $serviceConfigPath -ErrorAction SilentlyContinue | Out-String
+                    # نبحث عن ID أكبر من 0 (لأننا صفرناه)
                     if ($content -match "id\s*=\s*'(\d{6,12})'") {
-                        $id = $Matches[1].Trim()
-                        Write-Host "Found ID [$id] in service TOML config!"
-                        break
+                        $potentialId = $Matches[1].Trim()
+                        if ($potentialId -ne '0') {
+                            $id = $potentialId
+                            Write-Host "Found new generated ID [$id] in service TOML config!"
+                            break
+                        }
                     }
                 } catch {}
             }
@@ -186,9 +221,12 @@ jobs:
             try {
                 $cliOut = & $exe --get-id 2>$null
                 if ($cliOut -match '(\d{6,12})') {
-                    $id = $cliOut.Trim()
-                    Write-Host "Found ID [$id] via CLI!"
-                    break
+                    $potentialId = $cliOut.Trim()
+                    if ($potentialId -ne '0') {
+                        $id = $potentialId
+                        Write-Host "Found new generated ID [$id] via CLI!"
+                        break
+                    }
                 }
             } catch {}
 
@@ -238,4 +276,3 @@ jobs:
         }
         
         Write-Host "Shutting down runner."
-      
