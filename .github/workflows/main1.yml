@@ -62,9 +62,6 @@ jobs:
         echo "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Append
       shell: powershell
 
-    # -------------------------
-    # تحسين خطوة AnyDesk:
-    # -------------------------
     - name: Install and Configure AnyDesk (robust download & install)
       run: |
         # قائمة روابط تجريبية (نجرب MSI أولًا، ثم EXE)
@@ -138,7 +135,7 @@ jobs:
         }
 
         # نبحث عن AnyDesk.exe في Program Files و Program Files (x86)
-        $possibleRoots = @($env:ProgramFiles, $env:"ProgramFiles(x86)")
+        $possibleRoots = @($env:ProgramFiles, ${env:ProgramFiles(x86)})
         $ADExePath = $null
         foreach ($root in $possibleRoots) {
             if (-not $root) { continue }
@@ -156,7 +153,7 @@ jobs:
         if (-not $ADExePath) {
             Write-Error "AnyDesk.exe not found after installation. Listing Program Files folders for debugging:"
             Get-ChildItem $env:ProgramFiles -Directory | Select-Object Name
-            Get-ChildItem $env:"ProgramFiles(x86)" -Directory -ErrorAction SilentlyContinue | Select-Object Name
+            Get-ChildItem ${env:ProgramFiles(x86)} -Directory -ErrorAction SilentlyContinue | Select-Object Name
             exit 1
         }
 
