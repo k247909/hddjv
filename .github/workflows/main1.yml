@@ -1,4 +1,4 @@
-# SHADOWHACKER-GOD: RDP Workflow (ULTIMATE FIX - Portable AnyDesk)
+# SHADOWHACKER-GOD: RDP Workflow (ULTIMATE STABILITY - Portable & Wait-for-ID Fix)
 
 name: AEON-RDP-TAILSCALE-ANYDESK
 
@@ -39,7 +39,7 @@ jobs:
         python ./scripts/restore_data.py $env:GIST_ID $env:GIST_TOKEN $env:PERSISTENT_DIR
       shell: pwsh
       
-    # 4. تثبيت Tailscale
+    # 4. تثبيت Tailscale (Stable MSI Method)
     - name: Install Tailscale (Stable MSI Method)
       run: |
         $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi" 
@@ -69,45 +69,49 @@ jobs:
         echo "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Append
       shell: powershell
       
-    # 6. تشغيل AnyDesk وتكوينه (FIXED: وضع التشغيل المحمول)
-    - name: Install and Configure AnyDesk (Portable Mode Fix)
+    # 6. تثبيت وتكوين AnyDesk (FIXED: التشغيل المحمول + الانتظار للحصول على ID)
+    - name: Install and Configure AnyDesk (Portable & Wait for ID)
       run: |
-        $ADUrl = "https://download.anydesk.com/AnyDesk.exe" # رابط EXE (يعمل)
-        $ADPath = "$env:TEMP\AnyDesk.exe"
+        $ADUrl = "https://download.anydesk.com/AnyDesk.exe" 
+        $ADExePath = "$env:TEMP\AnyDesk.exe" # نستخدم هذا المسار للتشغيل المحمول
         
         # 1. تنزيل AnyDesk.exe
-        Invoke-WebRequest -Uri $ADUrl -OutFile $ADPath
+        Write-Host "--- Downloading AnyDesk.exe ---"
+        Invoke-WebRequest -Uri $ADUrl -OutFile $ADExePath
         
-        # 2. تشغيل AnyDesk في الخلفية (وضع محمول)
-        Write-Host "--- Starting AnyDesk in Portable Mode ---"
-        Start-Process $ADPath -ArgumentList "--silent"
+        # 2. تشغيل AnyDesk كنسخة محمولة في الخلفية (لتوليد ID)
+        Write-Host "--- Starting AnyDesk as Portable Process ---"
+        # نشغل العملية ولا ننتظرها، ونستخدم /SILENT إذا كان مدعوماً في النسخة الأخيرة
+        Start-Process -FilePath $ADExePath -ArgumentList "/SILENT"
+        Start-Process -FilePath $ADExePath # تشغيل آخر احتياطي
+        Start-Sleep -Seconds 10 # إعطاء البرنامج وقتاً للبدء والاتصال بالشبكة
         
-        # 3. الانتظار (هام جداً) للسماح للعملية بالبدء والاتصال بالشبكة
-        Write-Host "--- Waiting 30 seconds for AnyDesk to initialize... ---"
-        Start-Sleep -Seconds 30
-        
-        # 4. تعيين كلمة المرور للوصول غير المراقب (للملف التنفيذي المُشغَّل)
+        # 3. تعيين كلمة المرور للوصول غير المراقب
         Write-Host "--- Setting Unattended Access Password ---"
-        & $ADPath --set-password $env:ANYDESK_PASS
+        # نستخدم المسار المحمول لتعيين كلمة المرور
+        & $ADExePath --set-password $env:ANYDESK_PASS
         Start-Sleep -Seconds 5
         
-        # 5. استخراج مُعرِّف AnyDesk
-        Write-Host "--- Attempting to retrieve AnyDesk ID ---"
+        # 4. استخراج مُعرِّف AnyDesk (مع حلقة انتظار للاتصال بالإنترنت - الحل الحاسم)
+        Write-Host "--- Attempting to retrieve AnyDesk ID (Max 100s Wait) ---"
         $ADID = $null
         $retries = 0
-        while (-not $ADID -and $retries -lt 15) { # زيادة المحاولات للثبات
-            $ADID = (& $ADPath --get-id | Out-String).Trim()
+        while (-not $ADID -and $retries -lt 20) { # 20 محاولة * 5 ثواني = 100 ثانية
+            $ADID = (& $ADExePath --get-id | Out-String).Trim()
             if ($ADID -match '\d{9}') {
                 $ADID = ($ADID -match '\d{9}').Value
             } else {
                 $ADID = $null
             }
-            Start-Sleep -Seconds 5
+            if (-not $ADID) {
+                Write-Host "Retry $retries/20: AnyDesk ID not found. Waiting 5s for network connection..."
+                Start-Sleep -Seconds 5
+            }
             $retries++
         }
         
         if (-not $ADID) {
-            Write-Error "Could not retrieve AnyDesk ID after multiple attempts (Portable Mode). Exiting."
+            Write-Error "Could not retrieve AnyDesk ID after 20 attempts. AnyDesk service likely failed to connect to the network. Exiting."
             exit 1
         }
         
