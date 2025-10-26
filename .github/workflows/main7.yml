@@ -1,6 +1,6 @@
-# SHADOWHACKER-GOD: RDP Workflow (Final Fixed Code: Enforced Unattended Access)
+# SHADOWHACKER-GOD: RDP Workflow (Final Fixed Code: Added AnyDesk Firewall Rule)
 
-name: AEON-RDP-KING
+name: AEON-RDP-TAILSCALE-ANYDESK
 
 on:
   schedule:
@@ -71,7 +71,7 @@ jobs:
     # 6. تثبيت وتكوين AnyDesk (تطبيق قسري للوصول غير المراقب)
     - name: Install and Configure AnyDesk (Enforce Unattended Access)
       run: |
-        # دالة مساعدة: تنزيل الملف
+        # دالة مساعدة: تنزيل الملف (وظائف التنصيب بقيت كما هي)
         function Invoke-Download {
             param($url, $outPath)
             try {
@@ -92,7 +92,7 @@ jobs:
                 "${env:ProgramFiles(x86)}\AnyDesk", 
                 $env:ProgramFiles, 
                 ${env:ProgramFiles(x86)},
-                "C:\ProgramData\chocolatey\lib\anydesk.portable\tools" # إضافة مسار choco
+                "C:\ProgramData\chocolatey\lib\anydesk.portable\tools"
             )
             
             foreach ($root in $possibleRoots | Where-Object { $_ -ne $null -and (Test-Path $_) }) {
@@ -119,7 +119,6 @@ jobs:
         $installed = $false
 
         # --- محاولات التثبيت (MSI, Winget, Choco) ---
-        # (ابقاء منطق التثبيت السابق لضمان النجاح)
         if (Invoke-Download -url $msiUrl -outPath $msiPath) {
             Write-Host "Installing AnyDesk MSI via msiexec..."
             $msiProcess = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i", "`"$msiPath`"", "/qn", "/norestart" -PassThru
@@ -148,14 +147,13 @@ jobs:
             exit 0
         }
         
-        # --- تطبيق منطق الوصول غير المراقب القسري (منطقك الجديد) ---
+        # --- تطبيق منطق الوصول غير المراقب القسري ---
         Write-Host "🔧 تفعيل الوصول التلقائي (Unattended Access) قسرياً..."
         
         # 5.1) تثبيت الخدمة وتشغيلها (ضمان وجود الخدمة)
         $adService = Get-Service -Name "AnyDesk" -ErrorAction SilentlyContinue
         if (-not $adService) {
             Write-Host "📦 تشغيل خدمة AnyDesk لأول مرة (Install Service)..."
-            # تشغيل الملف التنفيذي مع flags تثبيت الخدمة
             Start-Process -FilePath "$ADExePath" -ArgumentList "--install-service" -Wait -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 5
         }
@@ -177,15 +175,8 @@ jobs:
         try {
             $regPath = "HKLM:\SOFTWARE\AnyDesk"
             if (!(Test-Path $regPath)) { New-Item -Path $regPath | Out-Null }
-
-            # 1. تفعيل الوصول غير المراقب
             Set-ItemProperty -Path $regPath -Name "EnableUnattendedAccess" -Type DWord -Value 1
-            
-            # 2. حفظ كلمة المرور في الـ Registry (ملاحظة: صيغة الـ PasswordHash قد تختلف، لكن هذه محاولة)
-            # بما أن PowerShell لا يقوم بتشفير الهاش بنفس طريقة AnyDesk، سنعتمد على الأمر --set-password 
-            # ولكن سنقوم بتعيين الـ SecurityPolicy على 1 (للسماح بكلمة المرور) كإجراء وقائي.
             Set-ItemProperty -Path $regPath -Name "SecurityPolicy" -Type DWord -Value 1 -ErrorAction SilentlyContinue 
-
             Write-Host "✅ تم تفعيل إعدادات الوصول التلقائي في الريجستري."
         } catch {
             Write-Warning "⚠ فشل في ضبط إعدادات الريجستري للوصول التلقائي."
@@ -221,6 +212,23 @@ jobs:
         }
         
       shell: powershell
+
+    # 6.5. فتح منفذ AnyDesk في جدار الحماية (إضافة جديدة)
+    - name: Open AnyDesk Firewall Port (TCP 6568)
+      run: |
+        Write-Host "🔥 فتح منفذ AnyDesk (TCP 6568) في جدار الحماية..."
+        try {
+            # إزالة القاعدة القديمة إذا كانت موجودة
+            Get-NetFirewallRule -DisplayName "AnyDesk_TCP_6568_Inbound" -ErrorAction SilentlyContinue | Remove-NetFirewallRule -Confirm:$false -ErrorAction SilentlyContinue
+            
+            # إضافة القاعدة الجديدة
+            New-NetFirewallRule -DisplayName "AnyDesk_TCP_6568_Inbound" -Direction Inbound -Protocol TCP -LocalPort 6568 -Action Allow -Profile Any
+            Write-Host "✅ تم فتح منفذ TCP 6568 بنجاح."
+        } catch {
+            Write-Warning "⚠ فشل في فتح منفذ جدار الحماية لـ AnyDesk. قد تحتاج إلى Tailscale/RDP."
+        }
+      shell: powershell
+
 
     # 7. تكوين RDP و إنشاء المستخدم
     - name: Configure RDP User and Set Password
@@ -266,4 +274,5 @@ jobs:
         Start-Sleep -Seconds 21000
         Write-Host "--- Executing final data save to Gist (5h 50m mark) ---"
         python ./scripts/save_data.py $env:GIST_ID $env:GIST_TOKEN $env:PERSISTENT_DIR
-        Write-Host "Data saved successfully. Shutting down. Auto-restart imminent
+        Write-Host "Data saved successfully. Shutting down. Auto-restart imminent."
+      shell: powershell
