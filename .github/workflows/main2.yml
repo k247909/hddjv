@@ -1,254 +1,142 @@
-name: AEON-RDP-TAILSCALE-ANYDESK
+name: secure-rdp
 
 on:
-  schedule:
-    - cron: '0 */6 * * *'
   workflow_dispatch:
 
 jobs:
-  secure-rdp:
+  build:
     runs-on: windows-latest
-    timeout-minutes: 360
 
     steps:
-    - uses: actions/checkout@v3
-
-    - name: Setup Secrets and Environment Variables
+    - name: 🧩 إعداد بيئة العمل
       run: |
-        echo "RDP_PASS=${{ secrets.RDP_PASSWORD }}" | Out-File -FilePath $env:GITHUB_ENV -Append
-        echo "RDP_USER=TOOLBOXLAP" | Out-File -FilePath $env:GITHUB_ENV -Append
-        echo "ANYDESK_PASS=${{ secrets.ANYDESK_PASSWORD }}" | Out-File -FilePath $env:GITHUB_ENV -Append
-        echo "PERSISTENT_DIR=C:\Users\TOOLBOXLAP\PersistentData" | Out-File -FilePath $env:GITHUB_ENV -Append
-        echo "GIST_TOKEN=${{ secrets.GIST_TOKEN }}" | Out-File -FilePath $env:GITHUB_ENV -Append
-        echo "GIST_ID=${{ secrets.GIST_ID }}" | Out-File -FilePath $env:GITHUB_ENV -Append
-      shell: powershell
-
-    - name: Install Python Libraries for Gist Access
-      run: pip install requests
-      shell: cmd
-
-    - name: Restore Persistent Data from Gist
-      run: |
+        Write-Host "🔧 بدء الإعداد..."
         mkdir $env:PERSISTENT_DIR -Force
-        python ./scripts/restore_data.py $env:GIST_ID $env:GIST_TOKEN $env:PERSISTENT_DIR
-      shell: pwsh
+        Write-Host "📁 تم إنشاء مجلد البيانات الدائمة."
+      shell: powershell
+      env:
+        PERSISTENT_DIR: C:\Users\TOOLBOXLAP\PersistentData
 
-    - name: Install Tailscale (Stable MSI Method)
+    - name: 🛡️ تثبيت Tailscale
       run: |
         $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-        $installerPath = "$env:TEMP\tailscale.msi"
-        Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-        Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-        Remove-Item $installerPath -Force
-        Start-Sleep -Seconds 5
+        $tsPath = "$env:TEMP\tailscale.msi"
+        Invoke-WebRequest $tsUrl -OutFile $tsPath -UseBasicParsing
+        Start-Process msiexec.exe -Wait -ArgumentList "/i `"$tsPath`" /qn"
+        Write-Host "✅ تم تثبيت Tailscale بنجاح."
       shell: powershell
 
-    - name: Establish Tailscale Connection & Get IP (Path Fixed)
+    - name: 🧰 تثبيت AnyDesk مع معالجة ذكية للأخطاء
       run: |
-        $TailscaleExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
-        & $TailscaleExe up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=AEON-RDP-WIN-$env:GITHUB_RUN_ID
-        $tsIP = $null
-        $retries = 0
-        while (-not $tsIP -and $retries -lt 15) {
-            $tsIP = & $TailscaleExe ip -4
-            Start-Sleep -Seconds 5
-            $retries++
-        }
-        if (-not $tsIP) {
-            Write-Error "Tailscale IP not assigned. Exiting."
-            exit 1
-        }
-        echo "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Append
-      shell: powershell
+        Write-Host "🚀 بدء تثبيت AnyDesk..."
 
-    - name: Install and Configure AnyDesk (robust, non-blocking)
-      run: |
-        function Invoke-Download {
-            param($url, $outPath)
+        $ErrorActionPreference = "Continue"
+        $logFile = "C:\Users\TOOLBOXLAP\PersistentData\AnyDeskPath.txt"
+        if (!(Test-Path "C:\Users\TOOLBOXLAP\PersistentData")) {
+            New-Item -ItemType Directory -Path "C:\Users\TOOLBOXLAP\PersistentData" | Out-Null
+        }
+
+        function Test-ADExe {
+            param($path)
+            return (Test-Path $path)
+        }
+
+        # --- المحاولة 1: تحميل مباشر من الموقع الرسمي ---
+        try {
+            $url = "https://download.anydesk.com/AnyDesk.exe"
+            $output = "$env:TEMP\AnyDesk.exe"
+            Write-Host "⬇️ محاولة تنزيل AnyDesk من الموقع الرسمي..."
+            Invoke-WebRequest $url -OutFile $output -UseBasicParsing -ErrorAction Stop
+            if (Test-ADExe $output) {
+                Write-Host "✅ تم تنزيل AnyDesk مباشرة."
+                $ADExePath = $output
+            }
+        } catch {
+            Write-Warning "⚠ فشل التنزيل المباشر. سيتم استخدام winget/choco."
+        }
+
+        # --- المحاولة 2: Winget ---
+        if (-not (Test-Path $ADExePath)) {
             try {
-                Write-Host "Downloading: $url -> $outPath"
-                Invoke-WebRequest -Uri $url -OutFile $outPath -UseBasicParsing -ErrorAction Stop
-                return $true
+                Write-Host "💿 محاولة تثبيت AnyDesk عبر Winget..."
+                winget install --id AnyDeskSoftwareGmbH.AnyDesk -e --accept-source-agreements --accept-package-agreements -h
             } catch {
-                Write-Warning "Download failed: $($_.Exception.Message)"
-                return $false
+                Write-Warning "⚠ Winget فشل. الانتقال إلى Chocolatey."
             }
         }
 
-        $tempDir = "$env:TEMP\AnyDesk"
-        New-Item -Path $tempDir -ItemType Directory -Force | Out-Null
-        $msiUrl = "https://download.anydesk.com/AnyDesk.msi"
-        $msiPath = Join-Path $tempDir "AnyDesk.msi"
-
-        # Try MSI download & silent install with timeout
-        $downloaded = Invoke-Download -url $msiUrl -outPath $msiPath
-        $installed = $false
-
-        if ($downloaded) {
-            Write-Host "Installing AnyDesk MSI via msiexec (silent)..."
-            $msiProcess = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i", "`"$msiPath`"", "/qn", "/norestart" -PassThru
-            $timeoutSeconds = 180
-            $sw = [diagnostics.stopwatch]::StartNew()
-            while (-not $msiProcess.HasExited -and $sw.Elapsed.TotalSeconds -lt $timeoutSeconds) {
-                Start-Sleep -Seconds 2
-            }
-            if (-not $msiProcess.HasExited) {
-                try { $msiProcess.Kill() } catch {}
-                Write-Error "msiexec did not exit within $timeoutSeconds seconds and was killed. Aborting install attempt to avoid hanging runner."
-                exit 1
-            } else {
-                Write-Host "msiexec exited with code $($msiProcess.ExitCode)"
-                if ($msiProcess.ExitCode -eq 0) { $installed = $true } else { Write-Warning "msiexec returned non-zero exit code ($($msiProcess.ExitCode))." }
-            }
-        } else {
-            Write-Warning "MSI download failed; will try winget/choco as fallback."
-        }
-
-        # winget fallback
-        if (-not $installed) {
+        # --- المحاولة 3: Chocolatey ---
+        if (-not (Test-Path $ADExePath)) {
             try {
-                $winget = Get-Command winget -ErrorAction SilentlyContinue
-                if ($winget) {
-                    Write-Host "Attempting winget install..."
-                    $p = Start-Process -FilePath "winget" -ArgumentList "install --silent --accept-package-agreements --accept-source-agreements AnyDesk.AnyDesk" -PassThru -NoNewWindow
-                    $p.WaitForExit(180000)
-                    if (-not $p.HasExited) { $p.Kill(); throw "winget timed out" }
-                    if ($p.ExitCode -eq 0) { $installed = $true } else { Write-Warning "winget exit code $($p.ExitCode)" }
-                } else {
-                    Write-Warning "winget not available on runner."
-                }
+                Write-Host "🍫 محاولة تثبيت AnyDesk عبر Chocolatey..."
+                choco install anydesk -y --force
             } catch {
-                Write-Warning "winget install failed: $($_.Exception.Message)"
+                Write-Warning "⚠ فشل Chocolatey."
             }
         }
 
-        # choco fallback
-        if (-not $installed) {
-            try {
-                $choco = Get-Command choco -ErrorAction SilentlyContinue
-                if ($choco) {
-                    Write-Host "Attempting choco install..."
-                    $p = Start-Process -FilePath "choco" -ArgumentList "install anydesk -y --no-progress" -PassThru -NoNewWindow
-                    $p.WaitForExit(240000)
-                    if (-not $p.HasExited) { $p.Kill(); throw "choco timed out" }
-                    if ($p.ExitCode -eq 0) { $installed = $true } else { Write-Warning "choco exit code $($p.ExitCode)" }
-                } else {
-                    Write-Warning "choco not available on runner."
-                }
-            } catch {
-                Write-Warning "choco install failed: $($_.Exception.Message)"
-            }
-        }
-
-        if (-not $installed) {
-            Write-Error "All AnyDesk install methods failed. Exiting."
-            exit 1
-        }
-
-        # Locate AnyDesk.exe (expanded to include Chocolatey/Winget/LocalAppData paths)
+        # --- التحقق من المسارات الشائعة بعد التثبيت ---
+        Write-Host "🔍 فحص المسارات الممكنة لـ AnyDesk..."
         $ADExePath = $null
-        $possibleRoots = @(
-            "$env:ProgramFiles\AnyDesk",
-            "$env:ProgramFiles (x86)\AnyDesk",
-            "C:\ProgramData\chocolatey\lib\anydesk.portable\tools",
-            "C:\ProgramData\chocolatey\lib\anydesk\tools",
-            "C:\ProgramData\chocolatey\lib\anydesk\tools\AnyDesk",
-            "C:\ProgramData\chocolatey\lib\anydesk.portable\tools",
-            "C:\ProgramData\chocolatey\lib\anydesk\tools",
-            "C:\ProgramData\chocolatey\lib",
-            "C:\ProgramData\chocolatey\bin",
-            "C:\ProgramData\chocolatey\lib\anydesk.portable\tools",
-            "C:\ProgramData\chocolatey\lib\anydesk\tools",
-            "C:\ProgramData\chocolatey\lib\anydesk.portable\tools",
-            "$env:LocalAppData\Programs\AnyDesk",
-            "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\AnyDesk"
+        $possiblePaths = @(
+            "C:\ProgramData\chocolatey\bin\AnyDesk.exe",
+            "C:\ProgramData\chocolatey\lib\anydesk.portable\tools\AnyDesk.exe",
+            "C:\ProgramData\chocolatey\lib\anydesk\tools\AnyDesk.exe",
+            "$env:ProgramFiles\AnyDesk\AnyDesk.exe",
+            "$env:ProgramFiles(x86)\AnyDesk\AnyDesk.exe",
+            "$env:LocalAppData\Programs\AnyDesk\AnyDesk.exe"
         )
 
-        foreach ($root in $possibleRoots | Select-Object -Unique) {
-            if (-not (Test-Path $root)) { continue }
-            try {
-                $candidate = Join-Path $root "AnyDesk.exe"
-                if (Test-Path $candidate) { $ADExePath = $candidate; break }
-                $found = Get-ChildItem -Path $root -Filter "AnyDesk.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-                if ($found) { $ADExePath = $found.FullName; break }
-            } catch {}
+        foreach ($p in $possiblePaths) {
+            if (Test-ADExe $p) {
+                Write-Host "✅ تم العثور على AnyDesk في: $p"
+                $ADExePath = $p
+                break
+            }
         }
 
+        # --- بحث عميق لو لم يتم العثور ---
         if (-not $ADExePath) {
-            Write-Error "AnyDesk.exe not found after install, even in extended paths."
-            Get-ChildItem "C:\ProgramData\chocolatey\lib" -Directory | Select-Object Name
+            Write-Host "🧭 بحث شامل في مجلد Chocolatey..."
+            $found = Get-ChildItem "C:\ProgramData\chocolatey" -Filter "AnyDesk.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) {
+                $ADExePath = $found.FullName
+                Write-Host "✅ تم العثور على AnyDesk في: $ADExePath"
+            }
+        }
+
+        # --- معالجة الفشل النهائي ---
+        if (-not $ADExePath) {
+            Write-Error "❌ فشل تحديد موقع AnyDesk بعد التثبيت. العملية توقفت."
             exit 1
         }
 
-        Write-Host "Found AnyDesk at: $ADExePath"
+        # --- تسجيل المسار في ملف نصي ---
+        Write-Host "📝 تسجيل المسار في $logFile"
+        "AnyDeskPath=$ADExePath" | Out-File -FilePath $logFile -Encoding UTF8 -Force
 
-        # Try to set unattended access password via CLI (best-effort)
+        # --- إعداد كلمة المرور وID ---
+        try { & "$ADExePath" --set-password $env:ANYDESK_PASS } catch { Write-Warning "⚠ فشل تعيين كلمة المرور." }
+        Start-Sleep -Seconds 5
         try {
-            Write-Host "Attempting to set AnyDesk password via CLI..."
-            & "$ADExePath" --set-password $env:ANYDESK_PASS 2>&1 | Out-Null
-            Start-Sleep -Seconds 3
+            $id = & "$ADExePath" --get-id
+            if ($id) {
+                echo "ANYDESK_ID=$id" | Out-File -FilePath $env:GITHUB_ENV -Append
+                Write-Host "🆔 AnyDesk ID: $id"
+            } else {
+                Write-Warning "⚠ لم يتم إرجاع AnyDesk ID."
+            }
         } catch {
-            Write-Warning "Setting AnyDesk password via CLI failed: $($_.Exception.Message)"
+            Write-Warning "⚠ فشل استرجاع ID."
         }
 
-        # Get AnyDesk ID with retries (best-effort)
-        $ADID = $null
-        $retries = 0
-        while (-not $ADID -and $retries -lt 12) {
-            try {
-                $raw = & "$ADExePath" --get-id 2>$null
-                if ($raw) {
-                    if ($raw -match '\d{6,12}') { $ADID = $Matches[0] } else { $ADID = $raw.Trim() }
-                }
-            } catch {}
-            if (-not $ADID) { Start-Sleep -Seconds 5 }
-            $retries++
-        }
-
-        if ($ADID) {
-            Write-Host "AnyDesk ID: $ADID"
-            echo "ANYDESK_ID=$ADID" | Out-File -FilePath $env:GITHUB_ENV -Append
-        } else {
-            Write-Warning "Could not retrieve AnyDesk ID. Continuing without ANYDESK_ID."
-        }
+        Write-Host "🎯 تم التثبيت والإعداد بنجاح."
       shell: powershell
+      env:
+        ANYDESK_PASS: "123456"
 
-    - name: Configure RDP User and Set Password
+    - name: ✅ إنهاء العملية
       run: |
-        $password = $env:RDP_PASS
-        $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-
-        if (-not (Get-LocalUser -Name "$env:RDP_USER" -ErrorAction SilentlyContinue)) {
-            New-LocalUser -Name "$env:RDP_USER" -Password $securePass -AccountNeverExpires
-        }
-
-        Add-LocalGroupMember -Group "Administrators" -Member "$env:RDP_USER"
-        Add-LocalGroupMember -Group "Remote Desktop Users" -Member "$env:RDP_USER"
-
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-        Restart-Service -Name TermService -Force
-      shell: powershell
-
-    - name: Display Connection Details
-      run: |
-        Write-Host "--------------------------------------------------------"
-        Write-Host "          SHADOWHACKER-GOD: DUAL CONNECTION INFO         "
-        Write-Host "--------------------------------------------------------"
-        Write-Host "   A. اتصال RDP عبر Tailscale (الأساسي):"
-        Write-Host "      - المستخدم (User): $env:RDP_USER"
-        Write-Host "      - كلمة مرور RDP (Password): ${{ secrets.RDP_PASSWORD }}"
-        Write-Host "      - عنوان IP (IP/Address): $env:TAILSCALE_IP"
-        Write-Host "--------------------------------------------------------"
-        Write-Host "   B. اتصال AnyDesk (الاحتياطي/المباشر):"
-        Write-Host "      - مُعرِّف AnyDesk (ID): $env:ANYDESK_ID"
-        Write-Host "      - كلمة مرور AnyDesk (Password): ${{ secrets.ANYDESK_PASSWORD }}"
-        Write-Host "--------------------------------------------------------"
-      shell: powershell
-
-    - name: Keep Alive and Data Sync Loop (Safe Shutdown)
-      run: |
-        Start-Sleep -Seconds 21000
-        Write-Host "--- Executing final data save to Gist (5h 50m mark) ---"
-        python ./scripts/save_data.py $env:GIST_ID $env:GIST_TOKEN $env:PERSISTENT_DIR
-        Write-Host "Data saved successfully. Shutting down. Auto-restart imminent."
+        Write-Host "🎉 كل شيء تم بنجاح! AnyDesk جاهز للعمل."
+        Get-Content "C:\Users\TOOLBOXLAP\PersistentData\AnyDeskPath.txt"
       shell: powershell
