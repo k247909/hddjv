@@ -1,4 +1,4 @@
-# SHADOWHACKER-GOD: RDP Workflow (FINAL SOLUTION: Guarantee Workflow Success via Tailscale)
+# SHADOWHACKER-GOD: RDP Workflow (Revert to FULL INSTALL + Deferred AnyDesk ID Retrieval)
 
 name: AEON-RDP-TAILSCALE-ANYDESK
 
@@ -50,7 +50,7 @@ jobs:
         Start-Sleep -Seconds 5 
       shell: powershell
 
-    # 5. توصيل Tailscale والحصول على IP (هذا هو الحل الأكيد)
+    # 5. توصيل Tailscale والحصول على IP (الحل الأساسي)
     - name: Establish Tailscale Connection & Get IP
       run: |
         $TailscaleExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
@@ -69,25 +69,39 @@ jobs:
         echo "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Append
       shell: powershell
       
-    # 6. تثبيت وتكوين AnyDesk (بدء التشغيل وتعيين كلمة المرور)
-    - name: Install and Configure AnyDesk (Start & Set Password)
+    # 6. تثبيت وتكوين AnyDesk (التثبيت الكامل + البحث الآلي عن المسار)
+    - name: Install and Configure AnyDesk (Full Install + Auto Path Discovery)
       run: |
         $ADUrl = "https://download.anydesk.com/AnyDesk.exe" 
-        $ADExePath = "$env:TEMP\AnyDesk.exe"
+        $ADInstallerPath = "$env:TEMP\AnyDeskSetup.exe"
         
-        Write-Host "--- Downloading AnyDesk.exe ---"
-        Invoke-WebRequest -Uri $ADUrl -OutFile $ADExePath
+        # 1. تنزيل ملف التثبيت
+        Write-Host "--- Downloading AnyDesk Installer ---"
+        Invoke-WebRequest -Uri $ADUrl -OutFile $ADInstallerPath
         
-        Write-Host "--- Clearing old AnyDesk configuration files ---"
-        Remove-Item "$env:ProgramData\AnyDesk\system.conf" -Force -ErrorAction SilentlyContinue
-        Remove-Item "$env:ProgramData\AnyDesk\*" -Recurse -Force -Exclude "ad_svc_user.json" -ErrorAction SilentlyContinue 
-        Start-Sleep -Seconds 3
+        # 2. بدء التثبيت الكامل الصامت
+        Write-Host "--- Starting Full Silent Installation of AnyDesk ---"
+        Start-Process -FilePath $ADInstallerPath -ArgumentList "--install $env:ProgramFiles(x86)\AnyDesk --silent" -Wait -PassThru | Out-Null
+        Start-Sleep -Seconds 15 # منح وقت لتسجيل الخدمة
+        
+        # 3. **البحث الآلي عن المسار المثبت**
+        $ADExePath = $null
+        $Path1 = "$env:ProgramFiles(x86)\AnyDesk\AnyDesk.exe"
+        $Path2 = "$env:ProgramFiles\AnyDesk\AnyDesk.exe"
 
-        Write-Host "--- Starting AnyDesk as Forced Portable Service (Background) ---"
-        Start-Process -FilePath $ADExePath -ArgumentList "--start-service" -PassThru | Out-Null
-        Start-Process -FilePath $ADExePath -PassThru | Out-Null 
-        Start-Sleep -Seconds 15 
+        if (Test-Path $Path1) {
+            $ADExePath = $Path1
+        } elseif (Test-Path $Path2) {
+            $ADExePath = $Path2
+        }
 
+        if (-not $ADExePath) {
+            Write-Error "CRITICAL: AnyDesk.exe not found after full installation. Exiting."
+            exit 1
+        }
+        Write-Host "AnyDesk executable found at: $ADExePath"
+        
+        # 4. تعيين كلمة المرور باستخدام المسار الذي تم العثور عليه
         Write-Host "--- Setting Unattended Access Password ---"
         & $ADExePath --set-password $env:ANYDESK_PASS
         Start-Sleep -Seconds 5
@@ -111,10 +125,28 @@ jobs:
         Restart-Service -Name TermService -Force
       shell: powershell
 
-    # 8. الحصول على ID (إلغاء فشل السير العمل عند عدم التوفر)
-    - name: Retrieve AnyDesk ID (Avoid Workflow Failure)
+    # 8. الحصول على ID (بعد استقرار النظام - وتجنب فشل السير العمل)
+    - name: Retrieve AnyDesk ID (Deferred & Non-Failing)
       run: |
-        $ADExePath = "$env:TEMP\AnyDesk.exe"
+        # 1. البحث الآلي عن المسار المثبت مرة أخرى
+        $ADExePath = $null
+        $Path1 = "$env:ProgramFiles(x86)\AnyDesk\AnyDesk.exe"
+        $Path2 = "$env:ProgramFiles\AnyDesk\AnyDesk.exe"
+
+        if (Test-Path $Path1) {
+            $ADExePath = $Path1
+        } elseif (Test-Path $Path2) {
+            $ADExePath = $Path2
+        }
+        
+        # إذا فشل التثبيت السابق، نعلن عن فشل AnyDesk ونستمر (لمنع توقف السير العمل)
+        if (-not $ADExePath) {
+             Write-Host "WARNING: AnyDesk installation failed previously or path not found. Setting ID to NOT_AVAILABLE."
+             echo "ANYDESK_ID=NOT_AVAILABLE" | Out-File -FilePath $env:GITHUB_ENV -Append
+             exit 0 # الخروج بنجاح
+        }
+
+        # 2. محاولة استخراج ID
         Write-Host "--- Attempting to retrieve AnyDesk ID (Max 200s Wait) ---"
         $ADID = $null
         $retries = 0
@@ -137,7 +169,7 @@ jobs:
         }
         
         if (-not $ADID) {
-            # التعديل هنا: نستخدم Write-Host فقط ونضع قيمة NOT_AVAILABLE لضمان نجاح الخطوة
+            # إرسال رسالة تحذير وإلغاء ID لضمان نجاح السير العمل
             Write-Host "WARNING: Could not retrieve AnyDesk ID after 40 attempts. Assuming network block."
             echo "ANYDESK_ID=NOT_AVAILABLE" | Out-File -FilePath $env:GITHUB_ENV -Append
         } else {
