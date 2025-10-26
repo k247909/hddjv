@@ -1,4 +1,4 @@
-# SHADOWHACKER-GOD: RDP Workflow (Final Fixed Code: Removed Arabic Encoding from Step 6)
+# SHADOWHACKER-GOD: RDP Workflow (Final Code: SYSTEM-Level Unattended Access Enforced)
 
 name: AEON-RDP-TAILSCALE-ANYDESK
 
@@ -31,7 +31,7 @@ jobs:
       run: pip install requests
       shell: cmd
 
-    # 3. استعادة البيانات الدائمة (يرجى التأكد من صحة GIST_TOKEN)
+    # 3. استعادة البيانات الدائمة (يرجى التأكد من صحة GIST_TOKEN لتفادي خطأ 401)
     - name: Restore Persistent Data from Gist
       run: |
         mkdir $env:PERSISTENT_DIR -Force
@@ -68,7 +68,7 @@ jobs:
         echo "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Append
       shell: powershell
 
-    # 6. تثبيت وتكوين AnyDesk (تطبيق قسري للوصول غير المراقب - نظيف من الترميز العربي)
+    # 6. تثبيت وتكوين AnyDesk (تطبيق قسري للوصول غير المراقب - SYSTEM-level)
     - name: Install and Configure AnyDesk (Enforce Unattended Access)
       run: |
         # Helper function: Download file
@@ -90,8 +90,6 @@ jobs:
             $possibleRoots = @(
                 "$env:ProgramFiles\AnyDesk", 
                 "${env:ProgramFiles(x86)}\AnyDesk", 
-                $env:ProgramFiles, 
-                ${env:ProgramFiles(x86)},
                 "C:\ProgramData\chocolatey\lib\anydesk.portable\tools"
             )
             
@@ -112,13 +110,13 @@ jobs:
             return $null
         }
 
+        # --- Installation attempts (MSI/Winget) ---
         $tempDir = "$env:TEMP\AnyDesk"
         New-Item -Path $tempDir -ItemType Directory -Force | Out-Null
         $msiUrl = "https://download.anydesk.com/AnyDesk.msi"
         $msiPath = Join-Path $tempDir "AnyDesk.msi"
         $installed = $false
 
-        # --- Installation attempts (MSI, Winget, Choco) ---
         if (Invoke-Download -url $msiUrl -outPath $msiPath) {
             Write-Host "Installing AnyDesk MSI via msiexec..."
             $msiProcess = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i", "`"$msiPath`"", "/qn", "/norestart" -PassThru
@@ -131,12 +129,6 @@ jobs:
             $p.WaitForExit(180000)
             if ($p.ExitCode -eq 0) { $installed = $true; Write-Host "winget installed successfully." }
         }
-        if (-not $installed -and (Get-Command choco -ErrorAction SilentlyContinue)) {
-            Write-Host "Attempting choco install..."
-            $p = Start-Process -FilePath "choco" -ArgumentList "install anydesk -y --no-progress" -PassThru -NoNewWindow
-            $p.WaitForExit(240000)
-            if ($p.ExitCode -eq 0) { $installed = $true; Write-Host "choco installed successfully." }
-        }
         
         # 4) Locate AnyDesk.exe 
         $ADExePath = Find-AnyDeskExe
@@ -147,8 +139,8 @@ jobs:
             exit 0
         }
         
-        # --- Enforcing Unattended Access ---
-        Write-Host "Enforcing Unattended Access configuration..."
+        # --- Enforcing SYSTEM-Level Unattended Access (Your New Logic) ---
+        Write-Host "Enforcing SYSTEM-Level Unattended Access configuration..."
         
         # 5.1) Install and Start Service
         $adService = Get-Service -Name "AnyDesk" -ErrorAction SilentlyContinue
@@ -160,31 +152,30 @@ jobs:
         
         Write-Host "Ensuring AnyDesk Service is running..."
         Start-Service -Name "AnyDesk" -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 3
-
-        # 5.2) Set password via CLI 
-        try {
-            Write-Host "Attempting to set AnyDesk password via CLI..."
-            & "$ADExePath" --set-password $env:ANYDESK_PASS 2>&1 | Out-Null
-            Start-Sleep -Seconds 3
-        } catch {
-            Write-Warning "Setting AnyDesk password via CLI failed. Relying on Registry."
-        }
+        Start-Sleep -Seconds 5
         
-        # 5.3) Force Unattended Access via Registry 
+        # 5.2) Force Unattended Access via HKLM Registry
         try {
             $regPath = "HKLM:\SOFTWARE\AnyDesk"
             if (!(Test-Path $regPath)) { New-Item -Path $regPath | Out-Null }
             
-            # 1. Enable Unattended Access
-            Set-ItemProperty -Path $regPath -Name "EnableUnattendedAccess" -Type DWord -Value 1
+            Write-Host "Setting Registry Keys..."
+            # Force Allow Always
+            Set-ItemProperty -Path $regPath -Name "ad.security.allow_always" -Type DWord -Value 1
+            # Force Unattended Access
+            Set-ItemProperty -Path $regPath -Name "ad.security.unattended" -Type DWord -Value 1
+            # Force Enable Password Login
+            Set-ItemProperty -Path $regPath -Name "ad.security.enable_password" -Type DWord -Value 1
             
-            # 2. Set Security Policy (Set to 1 to allow password access)
-            Set-ItemProperty -Path $regPath -Name "SecurityPolicy" -Type DWord -Value 1 -ErrorAction SilentlyContinue 
+            # 5.3) Create and set the base64 password hash
+            $pass = $env:ANYDESK_PASS
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($pass)
+            $hash = [System.Convert]::ToBase64String($bytes)
+            Set-ItemProperty -Path $regPath -Name "ad.security.password_hash" -Value $hash
 
-            Write-Host "Successfully enforced Unattended Access settings in Registry."
+            Write-Host "Successfully enforced Unattended Access settings in HKLM Registry."
         } catch {
-            Write-Warning "Failed to set Unattended Access Registry settings."
+            Write-Warning "Failed to set Unattended Access HKLM Registry settings."
         }
         
         # 5.4) Restart service to apply all settings
@@ -223,10 +214,7 @@ jobs:
       run: |
         Write-Host "Opening AnyDesk Firewall Port (TCP 6568)..."
         try {
-            # Remove old rule if it exists
             Get-NetFirewallRule -DisplayName "AnyDesk_TCP_6568_Inbound" -ErrorAction SilentlyContinue | Remove-NetFirewallRule -Confirm:$false -ErrorAction SilentlyContinue
-            
-            # Add new rule
             New-NetFirewallRule -DisplayName "AnyDesk_TCP_6568_Inbound" -Direction Inbound -Protocol TCP -LocalPort 6568 -Action Allow -Profile Any
             Write-Host "Successfully opened TCP 6568."
         } catch {
