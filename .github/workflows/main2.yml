@@ -1,6 +1,6 @@
-# SHADOWHACKER-GOD: RDP Workflow (Robust AnyDesk Install with Fallbacks & Timeouts)
+# SHADOWHACKER-GOD: RDP Workflow (Final Fixed Code: Robust Install Logic & Error Handling)
 
-name: AEON-RDP-TAILSCALE-ANYDESK
+name: RDP
 
 on:
   schedule:
@@ -15,7 +15,7 @@ jobs:
     steps:
     - uses: actions/checkout@v3
 
-    # 1. إعداد المتغيرات السرية والبيئة
+    # 1. إعداد المتغيرات السرية والبيئة (كما هي)
     - name: Setup Secrets and Environment Variables
       run: |
         echo "RDP_PASS=${{ secrets.RDP_PASSWORD }}" | Out-File -FilePath $env:GITHUB_ENV -Append
@@ -26,19 +26,19 @@ jobs:
         echo "GIST_ID=${{ secrets.GIST_ID }}" | Out-File -FilePath $env:GITHUB_ENV -Append
       shell: powershell
 
-    # 2. تثبيت مكتبة requests
+    # 2. تثبيت Python (كما هي)
     - name: Install Python Libraries for Gist Access
       run: pip install requests
       shell: cmd
 
-    # 3. استعادة البيانات الدائمة من Gist
+    # 3. استعادة البيانات الدائمة (كما هي)
     - name: Restore Persistent Data from Gist
       run: |
         mkdir $env:PERSISTENT_DIR -Force
         python ./scripts/restore_data.py $env:GIST_ID $env:GIST_TOKEN $env:PERSISTENT_DIR
       shell: pwsh
 
-    # 4. تثبيت Tailscale (Stable MSI Method)
+    # 4. تثبيت Tailscale (كما هي)
     - name: Install Tailscale (Stable MSI Method)
       run: |
         $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
@@ -49,7 +49,7 @@ jobs:
         Start-Sleep -Seconds 5
       shell: powershell
 
-    # 5. توصيل Tailscale والحصول على IP
+    # 5. توصيل Tailscale والحصول على IP (كما هي)
     - name: Establish Tailscale Connection & Get IP
       run: |
         $TailscaleExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
@@ -68,10 +68,10 @@ jobs:
         echo "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Append
       shell: powershell
 
-    # 6. تثبيت وتكوين AnyDesk (متعدد المحاولات، مع مهلة)
+    # 6. تثبيت وتكوين AnyDesk (إصلاح منطق التحكم وإضافة دالة التتبع)
     - name: Install and Configure AnyDesk (robust, non-blocking)
       run: |
-        # minimal helper functions
+        # دالة مساعدة: تنزيل الملف
         function Invoke-Download {
             param($url, $outPath)
             try {
@@ -83,31 +83,59 @@ jobs:
                 return $false
             }
         }
+        
+        # دالة مساعدة: تتبع موقع AnyDesk.exe (استجابة لاقتراحك)
+        function Find-AnyDeskExe {
+            $ADExePath = $null
+            # تصحيح صيغة الوصول للمتغيرات البيئية ذات الأقواس
+            $possibleRoots = @(
+                "$env:ProgramFiles\AnyDesk", 
+                "${env:ProgramFiles(x86)}\AnyDesk", 
+                $env:ProgramFiles, 
+                ${env:ProgramFiles(x86)}
+            )
+            
+            foreach ($root in $possibleRoots | Where-Object { $_ -ne $null -and (Test-Path $_) }) {
+                try {
+                    $candidate = Join-Path $root "AnyDesk.exe"
+                    if (Test-Path $candidate) { 
+                        Write-Host "Found AnyDesk (Direct Path): $candidate"
+                        return $candidate 
+                    }
+                    # بحث محدود العمق
+                    $found = Get-ChildItem -Path $root -Filter "AnyDesk.exe" -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 1
+                    if ($found) { 
+                        Write-Host "Found AnyDesk (Deep Search): $($found.FullName)"
+                        return $found.FullName 
+                    }
+                } catch {}
+            }
+            return $null
+        }
 
         $tempDir = "$env:TEMP\AnyDesk"
         New-Item -Path $tempDir -ItemType Directory -Force | Out-Null
         $msiUrl = "https://download.anydesk.com/AnyDesk.msi"
         $msiPath = Join-Path $tempDir "AnyDesk.msi"
-
-        # 1) Try MSI download & silent install with timeout
-        $downloaded = Invoke-Download -url $msiUrl -outPath $msiPath
         $installed = $false
 
-        if ($downloaded) {
+        # 1) Try MSI download & silent install with timeout
+        if (Invoke-Download -url $msiUrl -outPath $msiPath) {
             Write-Host "Installing AnyDesk MSI via msiexec (silent, 180s timeout)..."
             $msiProcess = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i", "`"$msiPath`"", "/qn", "/norestart" -PassThru
             $timeoutSeconds = 180
             $sw = [diagnostics.stopwatch]::StartNew()
-            while (-not $msiProcess.HasExited -and $sw.Elapsed.TotalSeconds -lt $timeoutSeconds) {
-                Start-Sleep -Seconds 2
-            }
+            while (-not $msiProcess.HasExited -and $sw.Elapsed.TotalSeconds -lt $timeoutSeconds) { Start-Sleep -Seconds 2 }
             if (-not $msiProcess.HasExited) {
                 try { $msiProcess.Kill() } catch {}
-                Write-Error "msiexec did not exit within $timeoutSeconds seconds and was killed. Aborting install attempt."
-                # بدلاً من exit 1 هنا، نستمر في المحاولات الأخرى
+                Write-Warning "msiexec killed due to timeout."
             } else {
-                Write-Host "msiexec exited with code $($msiProcess.ExitCode)"
-                if ($msiProcess.ExitCode -eq 0) { $installed = $true } else { Write-Warning "msiexec returned non-zero exit code ($($msiProcess.ExitCode))." }
+                if ($msiProcess.ExitCode -eq 0) { 
+                    $installed = $true
+                    Write-Host "MSI installed successfully." 
+                } else { 
+                    Write-Warning "msiexec returned non-zero exit code ($($msiProcess.ExitCode))." 
+                }
             }
         } else {
             Write-Warning "MSI download failed; will try winget/choco as fallback."
@@ -122,13 +150,15 @@ jobs:
                     $p = Start-Process -FilePath "winget" -ArgumentList "install --silent --accept-package-agreements --accept-source-agreements AnyDesk.AnyDesk" -PassThru -NoNewWindow
                     $p.WaitForExit(180000)
                     if (-not $p.HasExited) { $p.Kill(); throw "winget timed out" }
-                    if ($p.ExitCode -eq 0) { $installed = $true } else { Write-Warning "winget exit code $($p.ExitCode)" }
-                } else {
-                    Write-Warning "winget not available on runner."
+                    # التحقق من رمز الخروج (winget يعطي 0 للنجاح عادة)
+                    if ($p.ExitCode -eq 0) { 
+                         $installed = $true
+                         Write-Host "winget installed successfully." 
+                    } else { 
+                        Write-Warning "winget exited with code $($p.ExitCode)." 
+                    }
                 }
-            } catch {
-                Write-Warning "winget install failed: $($_.Exception.Message)"
-            }
+            } catch { Write-Warning "winget install failed: $($_.Exception.Message)" }
         }
 
         # 3) choco fallback
@@ -140,42 +170,26 @@ jobs:
                     $p = Start-Process -FilePath "choco" -ArgumentList "install anydesk -y --no-progress" -PassThru -NoNewWindow
                     $p.WaitForExit(240000)
                     if (-not $p.HasExited) { $p.Kill(); throw "choco timed out" }
-                    if ($p.ExitCode -eq 0) { $installed = $true } else { Write-Warning "choco exit code $($p.ExitCode)" }
-                } else {
-                    Write-Warning "choco not available on runner."
+                    # التحقق من رمز الخروج
+                    if ($p.ExitCode -eq 0) { 
+                        $installed = $true
+                        Write-Host "choco installed successfully."
+                    } else {
+                        Write-Warning "choco exited with code $($p.ExitCode)."
+                    }
                 }
-            } catch {
-                Write-Warning "choco install failed: $($_.Exception.Message)"
-            }
+            } catch { Write-Warning "choco install failed: $($_.Exception.Message)" }
         }
 
-        # 4) Locate AnyDesk.exe
-        if (-not $installed) {
-             Write-Error "All AnyDesk install methods failed. AnyDesk will be unavailable. Proceeding with Tailscale."
-             echo "ANYDESK_ID=INSTALL_FAILED" | Out-File -FilePath $env:GITHUB_ENV -Append
-        }
+        # 4) Locate AnyDesk.exe and finalize
+        $ADExePath = Find-AnyDeskExe
         
-        $possibleRoots = @("$env:ProgramFiles\AnyDesk", "${env:ProgramFiles(x86)}\AnyDesk", $env:ProgramFiles, ${env:ProgramFiles(x86)}) # تم تصحيح الصيغة النحوية
-        $ADExePath = $null
-        foreach ($root in $possibleRoots | Where-Object { $_ -ne $null }) {
-            try {
-                # البحث المباشر
-                $candidate = Join-Path $root "AnyDesk.exe"
-                if (Test-Path $candidate) { $ADExePath = $candidate; break }
-                # بحث أعمق
-                $found = Get-ChildItem -Path $root -Filter "AnyDesk.exe" -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 1
-                if ($found) { $ADExePath = $found.FullName; break }
-            } catch {}
-        }
-
         if (-not $ADExePath) {
-            Write-Warning "AnyDesk.exe not found after all install attempts. AnyDesk ID will be NOT_AVAILABLE."
+            Write-Warning "AnyDesk installation failed or executable not found. AnyDesk will be unavailable. Proceeding with Tailscale/RDP."
             echo "ANYDESK_ID=NOT_AVAILABLE" | Out-File -FilePath $env:GITHUB_ENV -Append
-            # نخرج بنجاح للحفاظ على سير العمل
+            # نخرج بنجاح (exit 0) لتجنب فشل السير العمل بالكامل
             exit 0
         }
-
-        Write-Host "Found AnyDesk at: $ADExePath"
 
         # 5) Try to set unattended access password via CLI (best-effort)
         try {
@@ -192,26 +206,24 @@ jobs:
         Write-Host "Attempting to retrieve AnyDesk ID (Max 60s Wait)..."
         while (-not $ADID -and $retries -lt 12) {
             try {
-                $raw = & "$ADExePath" --get-id 2>$null # تجاهل رسائل الخطأ 2>/dev/null
-                if ($raw) {
-                    if ($raw -match '\d{6,12}') { $ADID = $Matches[0] } else { $ADID = $raw.Trim() }
-                }
+                $raw = (& "$ADExePath" --get-id 2>$null | Out-String).Trim()
+                if ($raw -match '\d{6,12}') { $ADID = $Matches[0] } else { $ADID = $raw.Trim() }
             } catch {}
             if (-not $ADID) { Start-Sleep -Seconds 5 }
             $retries++
         }
 
-        if ($ADID) {
+        if ($ADID -and $ADID -ne 'True' -and $ADID -ne 'False') { # تصفية المخرجات الخاطئة المحتملة
             Write-Host "SUCCESS: AnyDesk ID: $ADID"
             echo "ANYDESK_ID=$ADID" | Out-File -FilePath $env:GITHUB_ENV -Append
         } else {
-            Write-Warning "Could not retrieve AnyDesk ID after multiple attempts. Assuming network block. Continuing."
+            Write-Warning "Could not retrieve valid AnyDesk ID. Continuing."
             echo "ANYDESK_ID=NOT_AVAILABLE" | Out-File -FilePath $env:GITHUB_ENV -Append
         }
         
       shell: powershell
 
-    # 7. تكوين RDP و إنشاء المستخدم
+    # 7. تكوين RDP و إنشاء المستخدم (كما هي)
     - name: Configure RDP User and Set Password
       run: |
         $password = $env:RDP_PASS
@@ -228,11 +240,11 @@ jobs:
         Restart-Service -Name TermService -Force
       shell: powershell
 
-    # 8. طباعة بيانات الاتصال
+    # 8. طباعة بيانات الاتصال (تم تحديثها للتعامل مع NOT_AVAILABLE)
     - name: Display Connection Details
       run: |
         $ADID = $env:ANYDESK_ID
-        if (-not $ADID) { $ADID = "NOT_AVAILABLE" } # لضمان عرض قيمة في حالة عدم تعيينها
+        if (-not $ADID) { $ADID = "NOT_AVAILABLE" }
 
         Write-Host "--------------------------------------------------------"
         Write-Host "          SHADOWHACKER-GOD: DUAL CONNECTION INFO         "
@@ -245,11 +257,11 @@ jobs:
         Write-Host "   B. اتصال AnyDesk (الاحتياطي):"
         Write-Host "      - مُعرِّف AnyDesk (ID): $ADID"
         Write-Host "      - كلمة مرور AnyDesk (Password): ${{ secrets.ANYDESK_PASSWORD }}"
-        Write-Host "      **ملاحظة: إذا كان ID هو 'NOT_AVAILABLE' أو 'INSTALL_FAILED'، استخدم Tailscale فقط**"
+        Write-Host "      **ملاحظة: إذا كان ID هو 'NOT_AVAILABLE'، استخدم Tailscale فقط**"
         Write-Host "--------------------------------------------------------"
       shell: powershell
 
-    # 9. حلقة الحفظ والإغلاق (للحفظ الآمن قبل 5h 50m)
+    # 9. حلقة الحفظ والإغلاق (كما هي)
     - name: Keep Alive and Data Sync Loop (Safe Shutdown)
       run: |
         Start-Sleep -Seconds 21000
