@@ -1,6 +1,6 @@
-# SHADOWHACKER-GOD: RDP Workflow (Final Code: SYSTEM-Level Unattended Access Enforced)
+# SHADOWHACKER-GOD: RDP Workflow (Final Code: Fixed Path & CLI Unattended Enforcement)
 
-name: AEON-RDP-TAILSCALE-ANYDESK
+name: RDP-ANYDESK
 
 on:
   schedule:
@@ -13,8 +13,9 @@ jobs:
     timeout-minutes: 360
 
     steps:
+    # (الخطوات 1-5 لم تتغير وتم حذفها للاختصار، لكنها تعمل)
     - uses: actions/checkout@v3
-    
+
     # 1. إعداد المتغيرات السرية والبيئة
     - name: Setup Secrets and Environment Variables
       run: |
@@ -67,126 +68,71 @@ jobs:
         }
         echo "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Append
       shell: powershell
-
-    # 6. تثبيت وتكوين AnyDesk (تطبيق قسري للوصول غير المراقب - SYSTEM-level)
+      
+    # 6. تثبيت وتكوين AnyDesk (تطبيق قسري للوصول غير المراقب - التركيز على CLI)
     - name: Install and Configure AnyDesk (Enforce Unattended Access)
       run: |
-        # Helper function: Download file
-        function Invoke-Download {
-            param($url, $outPath)
-            try {
-                Write-Host "Downloading: $url -> $outPath"
-                Invoke-WebRequest -Uri $url -OutFile $outPath -UseBasicParsing -ErrorAction Stop
-                return $true
-            } catch {
-                Write-Warning "Download failed: $($_.Exception.Message)"
-                return $false
-            }
-        }
-        
-        # Helper function: Locate AnyDesk.exe 
-        function Find-AnyDeskExe {
-            $ADExePath = $null
-            $possibleRoots = @(
-                "$env:ProgramFiles\AnyDesk", 
-                "${env:ProgramFiles(x86)}\AnyDesk", 
-                "C:\ProgramData\chocolatey\lib\anydesk.portable\tools"
-            )
-            
-            foreach ($root in $possibleRoots | Where-Object { $_ -ne $null -and (Test-Path $_) }) {
-                try {
-                    $candidate = Join-Path $root "AnyDesk.exe"
-                    if (Test-Path $candidate) { 
-                        Write-Host "Found AnyDesk (Direct Path): $candidate"
-                        return $candidate 
-                    }
-                    $found = Get-ChildItem -Path $root -Filter "AnyDesk.exe" -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 1
-                    if ($found) { 
-                        Write-Host "Found AnyDesk (Deep Search): $($found.FullName)"
-                        return $found.FullName 
-                    }
-                } catch {}
-            }
-            return $null
-        }
-
-        # --- Installation attempts (MSI/Winget) ---
-        $tempDir = "$env:TEMP\AnyDesk"
-        New-Item -Path $tempDir -ItemType Directory -Force | Out-Null
+        # --- 1) Install AnyDesk via MSI to a fixed path ---
         $msiUrl = "https://download.anydesk.com/AnyDesk.msi"
-        $msiPath = Join-Path $tempDir "AnyDesk.msi"
-        $installed = $false
+        $msiPath = "$env:TEMP\AnyDesk.msi"
+        $ADExePath = "${env:ProgramFiles(x86)}\AnyDesk\AnyDesk.exe"
+        
+        Write-Host "Downloading AnyDesk MSI..."
+        try {
+            Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath -UseBasicParsing -ErrorAction Stop
+        } catch {
+            Write-Error "Failed to download MSI: $($_.Exception.Message)"
+            exit 1
+        }
 
-        if (Invoke-Download -url $msiUrl -outPath $msiPath) {
-            Write-Host "Installing AnyDesk MSI via msiexec..."
-            $msiProcess = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i", "`"$msiPath`"", "/qn", "/norestart" -PassThru
-            $msiProcess.WaitForExit(180000)
-            if ($msiProcess.ExitCode -eq 0) { $installed = $true; Write-Host "MSI installed successfully." }
-        }
-        if (-not $installed -and (Get-Command winget -ErrorAction SilentlyContinue)) {
-            Write-Host "Attempting winget install..."
-            $p = Start-Process -FilePath "winget" -ArgumentList "install --silent --accept-package-agreements --accept-source-agreements AnyDesk.AnyDesk" -PassThru -NoNewWindow
-            $p.WaitForExit(180000)
-            if ($p.ExitCode -eq 0) { $installed = $true; Write-Host "winget installed successfully." }
-        }
+        Write-Host "Installing AnyDesk MSI to create the service and fixed path..."
+        Start-Process msiexec.exe -ArgumentList "/i", "`"$msiPath`"", "/qn", "/norestart" -Wait
+        Start-Sleep -Seconds 10
         
-        # 4) Locate AnyDesk.exe 
-        $ADExePath = Find-AnyDeskExe
-        
-        if (-not $ADExePath) {
-            Write-Warning "AnyDesk installation failed or executable not found. Proceeding with Tailscale/RDP."
-            echo "ANYDESK_ID=NOT_AVAILABLE" | Out-File -FilePath $env:GITHUB_ENV -Append
-            exit 0
+        if (-not (Test-Path $ADExePath)) {
+            $ADExePath = "$env:ProgramFiles\AnyDesk\AnyDesk.exe" # Try 64-bit path as well
+            if (-not (Test-Path $ADExePath)) {
+                Write-Error "AnyDesk.exe not found after installation. Exiting."
+                echo "ANYDESK_ID=NOT_AVAILABLE" | Out-File -FilePath $env:GITHUB_ENV -Append
+                exit 0
+            }
         }
         
-        # --- Enforcing SYSTEM-Level Unattended Access (Your New Logic) ---
-        Write-Host "Enforcing SYSTEM-Level Unattended Access configuration..."
-        
-        # 5.1) Install and Start Service
-        $adService = Get-Service -Name "AnyDesk" -ErrorAction SilentlyContinue
-        if (-not $adService) {
-            Write-Host "Installing AnyDesk Service..."
-            Start-Process -FilePath "$ADExePath" -ArgumentList "--install-service" -Wait -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 5
-        }
-        
+        # --- 2) Ensure Service is Running and Set Password/Unattended via CLI ---
         Write-Host "Ensuring AnyDesk Service is running..."
         Start-Service -Name "AnyDesk" -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 5
         
-        # 5.2) Force Unattended Access via HKLM Registry
+        Write-Host "Setting Unattended Password and enabling access (attempt 1/2)..."
+        # This command is the most reliable way for AnyDesk to set the correct password hash in HKLM
+        & "$ADExePath" --set-password $env:ANYDESK_PASS 2>&1 | Out-Null
+        Start-Sleep -Seconds 5 
+        
+        Write-Host "Setting Unattended Password and enabling access (attempt 2/2 - RESTART)..."
+        # Restarting the service and trying again often ensures success
+        Restart-Service -Name "AnyDesk" -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 5
+        & "$ADExePath" --set-password $env:ANYDESK_PASS 2>&1 | Out-Null
+        Start-Service -Name "AnyDesk" -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 5
+
+        # --- 3) Force Unattended Access and Policy via HKLM Registry (for safety) ---
         try {
             $regPath = "HKLM:\SOFTWARE\AnyDesk"
             if (!(Test-Path $regPath)) { New-Item -Path $regPath | Out-Null }
             
-            Write-Host "Setting Registry Keys..."
-            # Force Allow Always
-            Set-ItemProperty -Path $regPath -Name "ad.security.allow_always" -Type DWord -Value 1
-            # Force Unattended Access
-            Set-ItemProperty -Path $regPath -Name "ad.security.unattended" -Type DWord -Value 1
-            # Force Enable Password Login
-            Set-ItemProperty -Path $regPath -Name "ad.security.enable_password" -Type DWord -Value 1
-            
-            # 5.3) Create and set the base64 password hash
-            $pass = $env:ANYDESK_PASS
-            $bytes = [System.Text.Encoding]::UTF8.GetBytes($pass)
-            $hash = [System.Convert]::ToBase64String($bytes)
-            Set-ItemProperty -Path $regPath -Name "ad.security.password_hash" -Value $hash
+            Write-Host "Enforcing Unattended policy in HKLM Registry..."
+            # ad.security.allow_always = 1 ensures no manual acceptance is needed
+            Set-ItemProperty -Path $regPath -Name "ad.security.allow_always" -Type DWord -Value 1 -ErrorAction SilentlyContinue
+            # ad.security.unattended = 1 is the explicit unattended flag
+            Set-ItemProperty -Path $regPath -Name "ad.security.unattended" -Type DWord -Value 1 -ErrorAction SilentlyContinue
 
-            Write-Host "Successfully enforced Unattended Access settings in HKLM Registry."
+            Write-Host "Unattended Access Registry keys set (relying on CLI for password hash)."
         } catch {
             Write-Warning "Failed to set Unattended Access HKLM Registry settings."
         }
         
-        # 5.4) Restart service to apply all settings
-        $AnyDeskService = Get-Service -Name AnyDesk -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($AnyDeskService) {
-            Write-Host "Restarting AnyDesk Service to apply all configurations..."
-            Restart-Service -Name AnyDesk -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 5
-        }
-
-        # 6) Get AnyDesk ID with retries (best-effort)
+        # --- 4) Retrieve AnyDesk ID ---
         $ADID = $null
         $retries = 0
         Write-Host "Attempting to retrieve AnyDesk ID (Max 60s Wait)..."
