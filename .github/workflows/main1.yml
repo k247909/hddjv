@@ -1,4 +1,4 @@
-# SHADOWHACKER-GOD: RDP Workflow (ULTIMATE FIX - Force Service Start)
+# SHADOWHACKER-GOD: RDP Workflow (ULTIMATE FIX - Portable AnyDesk)
 
 name: AEON-RDP-TAILSCALE-ANYDESK
 
@@ -69,8 +69,8 @@ jobs:
         echo "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Append
       shell: powershell
       
-    # 6. تثبيت AnyDesk وتكوينه (FIXED: تشغيل الخدمة قسرياً)
-    - name: Install and Configure AnyDesk (Force Service Start Fix)
+    # 6. تشغيل AnyDesk وتكوينه (FIXED: وضع التشغيل المحمول)
+    - name: Install and Configure AnyDesk (Portable Mode Fix)
       run: |
         $ADUrl = "https://download.anydesk.com/AnyDesk.exe" # رابط EXE (يعمل)
         $ADPath = "$env:TEMP\AnyDesk.exe"
@@ -78,39 +78,25 @@ jobs:
         # 1. تنزيل AnyDesk.exe
         Invoke-WebRequest -Uri $ADUrl -OutFile $ADPath
         
-        # 2. التثبيت الصامت
-        Write-Host "--- Installing AnyDesk Silently ---"
-        Start-Process $ADPath -ArgumentList "--install `"$env:PROGRAMFILES(X86)\AnyDesk`" --silent --start-with-win" -Wait
-        Start-Sleep -Seconds 10 
-
-        # 3. البحث الديناميكي عن مسار الخدمة (الأكثر موثوقية)
-        Write-Host "--- Dynamically locating AnyDesk Service Path ---"
-        $ADService = Get-CimInstance -ClassName Win32_Service -Filter "Name='AnyDeskSvc'"
-        if (-not $ADService) {
-            Write-Error "AnyDesk Service (AnyDeskSvc) not found after installation. Exiting."
-            exit 1
-        }
-        # استخراج المسار من الخدمة
-        $ADExePath = $ADService.PathName.Replace('"', '') -replace " --service", ""
-        Write-Host "AnyDesk.exe found at: $ADExePath"
-
-        # 4. إجبار الخدمة على البدء (الحل الحاسم)
-        Write-Host "--- Force Starting AnyDesk Service ---"
-        Start-Service -Name "AnyDeskSvc"
-        Start-Sleep -Seconds 10 # إعطاء الخدمة وقتاً للاتصال بالإنترنت
+        # 2. تشغيل AnyDesk في الخلفية (وضع محمول)
+        Write-Host "--- Starting AnyDesk in Portable Mode ---"
+        Start-Process $ADPath -ArgumentList "--silent"
         
-        # 5. تعيين كلمة المرور للوصول غير المراقب
+        # 3. الانتظار (هام جداً) للسماح للعملية بالبدء والاتصال بالشبكة
+        Write-Host "--- Waiting 30 seconds for AnyDesk to initialize... ---"
+        Start-Sleep -Seconds 30
+        
+        # 4. تعيين كلمة المرور للوصول غير المراقب (للملف التنفيذي المُشغَّل)
         Write-Host "--- Setting Unattended Access Password ---"
-        & $ADExePath --set-password $env:ANYDESK_PASS
+        & $ADPath --set-password $env:ANYDESK_PASS
         Start-Sleep -Seconds 5
         
-        # 6. استخراج مُعرِّف AnyDesk
+        # 5. استخراج مُعرِّف AnyDesk
         Write-Host "--- Attempting to retrieve AnyDesk ID ---"
         $ADID = $null
         $retries = 0
-        while (-not $ADID -and $retries -lt 20) { 
-            # استخدام Out-String لالتقاط المخرجات بشكل صحيح
-            $ADID = (& $ADExePath --get-id | Out-String).Trim()
+        while (-not $ADID -and $retries -lt 15) { # زيادة المحاولات للثبات
+            $ADID = (& $ADPath --get-id | Out-String).Trim()
             if ($ADID -match '\d{9}') {
                 $ADID = ($ADID -match '\d{9}').Value
             } else {
@@ -121,7 +107,7 @@ jobs:
         }
         
         if (-not $ADID) {
-            Write-Error "Could not retrieve AnyDesk ID after multiple attempts (Service Started). Exiting."
+            Write-Error "Could not retrieve AnyDesk ID after multiple attempts (Portable Mode). Exiting."
             exit 1
         }
         
@@ -166,8 +152,12 @@ jobs:
     # 9. حلقة الحفظ والإغلاق (للحفظ الآمن قبل 5h 50m)
     - name: Keep Alive and Data Sync Loop (Safe Shutdown)
       run: |
+        # الانتظار لمدة 5 ساعات و 50 دقيقة (21000 ثانية)
         Start-Sleep -Seconds 21000 
+        
         Write-Host "--- Executing final data save to Gist (5h 50m mark) ---"
+        # **خطوة الحفظ الآمن**
         python ./scripts/save_data.py $env:GIST_ID $env:GIST_TOKEN $env:PERSISTENT_DIR
+        
         Write-Host "Data saved successfully. Shutting down. Auto-restart imminent."
       shell: powershell
