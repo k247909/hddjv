@@ -1,4 +1,4 @@
-# SHADOWHACKER-GOD: RDP Workflow (Final Fixed Code: Added AnyDesk Firewall Rule)
+# SHADOWHACKER-GOD: RDP Workflow (Final Fixed Code: Removed Arabic Encoding from Step 6)
 
 name: AEON-RDP-TAILSCALE-ANYDESK
 
@@ -31,7 +31,7 @@ jobs:
       run: pip install requests
       shell: cmd
 
-    # 3. استعادة البيانات الدائمة
+    # 3. استعادة البيانات الدائمة (يرجى التأكد من صحة GIST_TOKEN)
     - name: Restore Persistent Data from Gist
       run: |
         mkdir $env:PERSISTENT_DIR -Force
@@ -68,10 +68,10 @@ jobs:
         echo "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Append
       shell: powershell
 
-    # 6. تثبيت وتكوين AnyDesk (تطبيق قسري للوصول غير المراقب)
+    # 6. تثبيت وتكوين AnyDesk (تطبيق قسري للوصول غير المراقب - نظيف من الترميز العربي)
     - name: Install and Configure AnyDesk (Enforce Unattended Access)
       run: |
-        # دالة مساعدة: تنزيل الملف (وظائف التنصيب بقيت كما هي)
+        # Helper function: Download file
         function Invoke-Download {
             param($url, $outPath)
             try {
@@ -84,7 +84,7 @@ jobs:
             }
         }
         
-        # دالة مساعدة: تتبع موقع AnyDesk.exe 
+        # Helper function: Locate AnyDesk.exe 
         function Find-AnyDeskExe {
             $ADExePath = $null
             $possibleRoots = @(
@@ -118,7 +118,7 @@ jobs:
         $msiPath = Join-Path $tempDir "AnyDesk.msi"
         $installed = $false
 
-        # --- محاولات التثبيت (MSI, Winget, Choco) ---
+        # --- Installation attempts (MSI, Winget, Choco) ---
         if (Invoke-Download -url $msiUrl -outPath $msiPath) {
             Write-Host "Installing AnyDesk MSI via msiexec..."
             $msiProcess = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i", "`"$msiPath`"", "/qn", "/norestart" -PassThru
@@ -147,22 +147,22 @@ jobs:
             exit 0
         }
         
-        # --- تطبيق منطق الوصول غير المراقب القسري ---
-        Write-Host "🔧 تفعيل الوصول التلقائي (Unattended Access) قسرياً..."
+        # --- Enforcing Unattended Access ---
+        Write-Host "Enforcing Unattended Access configuration..."
         
-        # 5.1) تثبيت الخدمة وتشغيلها (ضمان وجود الخدمة)
+        # 5.1) Install and Start Service
         $adService = Get-Service -Name "AnyDesk" -ErrorAction SilentlyContinue
         if (-not $adService) {
-            Write-Host "📦 تشغيل خدمة AnyDesk لأول مرة (Install Service)..."
+            Write-Host "Installing AnyDesk Service..."
             Start-Process -FilePath "$ADExePath" -ArgumentList "--install-service" -Wait -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 5
         }
         
-        Write-Host "🚀 التأكد من بدء خدمة AnyDesk..."
+        Write-Host "Ensuring AnyDesk Service is running..."
         Start-Service -Name "AnyDesk" -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 3
 
-        # 5.2) تعيين كلمة المرور عبر CLI (المحاولة الأولى)
+        # 5.2) Set password via CLI 
         try {
             Write-Host "Attempting to set AnyDesk password via CLI..."
             & "$ADExePath" --set-password $env:ANYDESK_PASS 2>&1 | Out-Null
@@ -171,18 +171,23 @@ jobs:
             Write-Warning "Setting AnyDesk password via CLI failed. Relying on Registry."
         }
         
-        # 5.3) تفعيل الوصول التلقائي قسرياً عبر الريجستري (الأكثر فعالية)
+        # 5.3) Force Unattended Access via Registry 
         try {
             $regPath = "HKLM:\SOFTWARE\AnyDesk"
             if (!(Test-Path $regPath)) { New-Item -Path $regPath | Out-Null }
+            
+            # 1. Enable Unattended Access
             Set-ItemProperty -Path $regPath -Name "EnableUnattendedAccess" -Type DWord -Value 1
+            
+            # 2. Set Security Policy (Set to 1 to allow password access)
             Set-ItemProperty -Path $regPath -Name "SecurityPolicy" -Type DWord -Value 1 -ErrorAction SilentlyContinue 
-            Write-Host "✅ تم تفعيل إعدادات الوصول التلقائي في الريجستري."
+
+            Write-Host "Successfully enforced Unattended Access settings in Registry."
         } catch {
-            Write-Warning "⚠ فشل في ضبط إعدادات الريجستري للوصول التلقائي."
+            Write-Warning "Failed to set Unattended Access Registry settings."
         }
         
-        # 5.4) إعادة تشغيل الخدمة لتطبيق جميع الإعدادات
+        # 5.4) Restart service to apply all settings
         $AnyDeskService = Get-Service -Name AnyDesk -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($AnyDeskService) {
             Write-Host "Restarting AnyDesk Service to apply all configurations..."
@@ -213,19 +218,19 @@ jobs:
         
       shell: powershell
 
-    # 6.5. فتح منفذ AnyDesk في جدار الحماية (إضافة جديدة)
+    # 6.5. فتح منفذ AnyDesk في جدار الحماية
     - name: Open AnyDesk Firewall Port (TCP 6568)
       run: |
-        Write-Host "🔥 فتح منفذ AnyDesk (TCP 6568) في جدار الحماية..."
+        Write-Host "Opening AnyDesk Firewall Port (TCP 6568)..."
         try {
-            # إزالة القاعدة القديمة إذا كانت موجودة
+            # Remove old rule if it exists
             Get-NetFirewallRule -DisplayName "AnyDesk_TCP_6568_Inbound" -ErrorAction SilentlyContinue | Remove-NetFirewallRule -Confirm:$false -ErrorAction SilentlyContinue
             
-            # إضافة القاعدة الجديدة
+            # Add new rule
             New-NetFirewallRule -DisplayName "AnyDesk_TCP_6568_Inbound" -Direction Inbound -Protocol TCP -LocalPort 6568 -Action Allow -Profile Any
-            Write-Host "✅ تم فتح منفذ TCP 6568 بنجاح."
+            Write-Host "Successfully opened TCP 6568."
         } catch {
-            Write-Warning "⚠ فشل في فتح منفذ جدار الحماية لـ AnyDesk. قد تحتاج إلى Tailscale/RDP."
+            Write-Warning "Failed to open AnyDesk firewall port."
         }
       shell: powershell
 
