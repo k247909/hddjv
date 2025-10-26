@@ -1,4 +1,4 @@
-# SHADOWHACKER-GOD: RDP Workflow (ULTIMATE STABILITY - Portable & Wait-for-ID Fix)
+# SHADOWHACKER-GOD: RDP Workflow (ULTIMATE STABILITY - Force AnyDesk Service)
 
 name: AEON-RDP-TAILSCALE-ANYDESK
 
@@ -11,7 +11,7 @@ on:
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 360 # المهلة القصوى لـ GitHub
+    timeout-minutes: 360 
     
     steps:
     - uses: actions/checkout@v3
@@ -69,8 +69,8 @@ jobs:
         echo "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Append
       shell: powershell
       
-    # 6. تثبيت وتكوين AnyDesk (FIXED: التشغيل المحمول + الانتظار للحصول على ID)
-    - name: Install and Configure AnyDesk (Portable & Wait for ID)
+    # 6. تثبيت وتكوين AnyDesk (FIXED: التشغيل القسري للخدمة + الانتظار للحصول على ID)
+    - name: Install and Configure AnyDesk (Force Service Start & Wait for ID)
       run: |
         $ADUrl = "https://download.anydesk.com/AnyDesk.exe" 
         $ADExePath = "$env:TEMP\AnyDesk.exe" # نستخدم هذا المسار للتشغيل المحمول
@@ -79,24 +79,22 @@ jobs:
         Write-Host "--- Downloading AnyDesk.exe ---"
         Invoke-WebRequest -Uri $ADUrl -OutFile $ADExePath
         
-        # 2. تشغيل AnyDesk كنسخة محمولة في الخلفية (لتوليد ID)
-        Write-Host "--- Starting AnyDesk as Portable Process ---"
-        # نشغل العملية ولا ننتظرها، ونستخدم /SILENT إذا كان مدعوماً في النسخة الأخيرة
-        Start-Process -FilePath $ADExePath -ArgumentList "/SILENT"
-        Start-Process -FilePath $ADExePath # تشغيل آخر احتياطي
-        Start-Sleep -Seconds 10 # إعطاء البرنامج وقتاً للبدء والاتصال بالشبكة
+        # 2. بدء تشغيل AnyDesk كخدمة محمولة قسرية (الحل الحاسم)
+        Write-Host "--- Starting AnyDesk as Forced Portable Service ---"
+        # تشغيل AnyDesk في وضع الخدمة (توليد ID/ اتصال)
+        Start-Process -FilePath $ADExePath -ArgumentList "--start-service" -PassThru | Out-Null
+        Start-Sleep -Seconds 10 # إعطاء البرنامج وقتاً للبدء
         
         # 3. تعيين كلمة المرور للوصول غير المراقب
         Write-Host "--- Setting Unattended Access Password ---"
-        # نستخدم المسار المحمول لتعيين كلمة المرور
         & $ADExePath --set-password $env:ANYDESK_PASS
         Start-Sleep -Seconds 5
         
-        # 4. استخراج مُعرِّف AnyDesk (مع حلقة انتظار للاتصال بالإنترنت - الحل الحاسم)
-        Write-Host "--- Attempting to retrieve AnyDesk ID (Max 100s Wait) ---"
+        # 4. استخراج مُعرِّف AnyDesk (مع حلقة انتظار للاتصال بالإنترنت)
+        Write-Host "--- Attempting to retrieve AnyDesk ID (Max 150s Wait) ---"
         $ADID = $null
         $retries = 0
-        while (-not $ADID -and $retries -lt 20) { # 20 محاولة * 5 ثواني = 100 ثانية
+        while (-not $ADID -and $retries -lt 30) { # 30 محاولة * 5 ثواني = 150 ثانية
             $ADID = (& $ADExePath --get-id | Out-String).Trim()
             if ($ADID -match '\d{9}') {
                 $ADID = ($ADID -match '\d{9}').Value
@@ -104,14 +102,17 @@ jobs:
                 $ADID = $null
             }
             if (-not $ADID) {
-                Write-Host "Retry $retries/20: AnyDesk ID not found. Waiting 5s for network connection..."
+                Write-Host "Retry $retries/30: AnyDesk ID not found. Waiting 5s for network connection..."
                 Start-Sleep -Seconds 5
+            } else {
+                Write-Host "AnyDesk ID found: $ADID"
+                break
             }
             $retries++
         }
         
         if (-not $ADID) {
-            Write-Error "Could not retrieve AnyDesk ID after 20 attempts. AnyDesk service likely failed to connect to the network. Exiting."
+            Write-Error "Could not retrieve AnyDesk ID after 30 attempts. Check firewall or network connectivity issues."
             exit 1
         }
         
@@ -156,12 +157,8 @@ jobs:
     # 9. حلقة الحفظ والإغلاق (للحفظ الآمن قبل 5h 50m)
     - name: Keep Alive and Data Sync Loop (Safe Shutdown)
       run: |
-        # الانتظار لمدة 5 ساعات و 50 دقيقة (21000 ثانية)
         Start-Sleep -Seconds 21000 
-        
         Write-Host "--- Executing final data save to Gist (5h 50m mark) ---"
-        # **خطوة الحفظ الآمن**
         python ./scripts/save_data.py $env:GIST_ID $env:GIST_TOKEN $env:PERSISTENT_DIR
-        
         Write-Host "Data saved successfully. Shutting down. Auto-restart imminent."
       shell: powershell
