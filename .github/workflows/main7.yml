@@ -1,0 +1,269 @@
+# SHADOWHACKER-GOD: RDP Workflow (Final Fixed Code: Enforced Unattended Access)
+
+name: AEON-RDP-KING
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+    - uses: actions/checkout@v3
+    
+    # 1. إعداد المتغيرات السرية والبيئة
+    - name: Setup Secrets and Environment Variables
+      run: |
+        echo "RDP_PASS=${{ secrets.RDP_PASSWORD }}" | Out-File -FilePath $env:GITHUB_ENV -Append
+        echo "RDP_USER=TOOLBOXLAP" | Out-File -FilePath $env:GITHUB_ENV -Append
+        echo "ANYDESK_PASS=${{ secrets.ANYDESK_PASSWORD }}" | Out-File -FilePath $env:GITHUB_ENV -Append
+        echo "PERSISTENT_DIR=C:\Users\TOOLBOXLAP\PersistentData" | Out-File -FilePath $env:GITHUB_ENV -Append
+        echo "GIST_TOKEN=${{ secrets.GIST_TOKEN }}" | Out-File -FilePath $env:GITHUB_ENV -Append
+        echo "GIST_ID=${{ secrets.GIST_ID }}" | Out-File -FilePath $env:GITHUB_ENV -Append
+      shell: powershell
+
+    # 2. تثبيت Python
+    - name: Install Python Libraries for Gist Access
+      run: pip install requests
+      shell: cmd
+
+    # 3. استعادة البيانات الدائمة
+    - name: Restore Persistent Data from Gist
+      run: |
+        mkdir $env:PERSISTENT_DIR -Force
+        python ./scripts/restore_data.py $env:GIST_ID $env:GIST_TOKEN $env:PERSISTENT_DIR
+      shell: pwsh
+
+    # 4. تثبيت Tailscale
+    - name: Install Tailscale (Stable MSI Method)
+      run: |
+        $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+        $installerPath = "$env:TEMP\tailscale.msi"
+        Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+        Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+        Remove-Item $installerPath -Force
+        Start-Sleep -Seconds 5
+      shell: powershell
+
+    # 5. توصيل Tailscale والحصول على IP
+    - name: Establish Tailscale Connection & Get IP
+      run: |
+        $TailscaleExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
+        & $TailscaleExe up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=AEON-RDP-WIN-$env:GITHUB_RUN_ID
+        $tsIP = $null
+        $retries = 0
+        while (-not $tsIP -and $retries -lt 15) {
+            $tsIP = & $TailscaleExe ip -4
+            Start-Sleep -Seconds 5
+            $retries++
+        }
+        if (-not $tsIP) {
+            Write-Error "Tailscale IP not assigned. Exiting."
+            exit 1
+        }
+        echo "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Append
+      shell: powershell
+
+    # 6. تثبيت وتكوين AnyDesk (تطبيق قسري للوصول غير المراقب)
+    - name: Install and Configure AnyDesk (Enforce Unattended Access)
+      run: |
+        # دالة مساعدة: تنزيل الملف
+        function Invoke-Download {
+            param($url, $outPath)
+            try {
+                Write-Host "Downloading: $url -> $outPath"
+                Invoke-WebRequest -Uri $url -OutFile $outPath -UseBasicParsing -ErrorAction Stop
+                return $true
+            } catch {
+                Write-Warning "Download failed: $($_.Exception.Message)"
+                return $false
+            }
+        }
+        
+        # دالة مساعدة: تتبع موقع AnyDesk.exe 
+        function Find-AnyDeskExe {
+            $ADExePath = $null
+            $possibleRoots = @(
+                "$env:ProgramFiles\AnyDesk", 
+                "${env:ProgramFiles(x86)}\AnyDesk", 
+                $env:ProgramFiles, 
+                ${env:ProgramFiles(x86)},
+                "C:\ProgramData\chocolatey\lib\anydesk.portable\tools" # إضافة مسار choco
+            )
+            
+            foreach ($root in $possibleRoots | Where-Object { $_ -ne $null -and (Test-Path $_) }) {
+                try {
+                    $candidate = Join-Path $root "AnyDesk.exe"
+                    if (Test-Path $candidate) { 
+                        Write-Host "Found AnyDesk (Direct Path): $candidate"
+                        return $candidate 
+                    }
+                    $found = Get-ChildItem -Path $root -Filter "AnyDesk.exe" -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 1
+                    if ($found) { 
+                        Write-Host "Found AnyDesk (Deep Search): $($found.FullName)"
+                        return $found.FullName 
+                    }
+                } catch {}
+            }
+            return $null
+        }
+
+        $tempDir = "$env:TEMP\AnyDesk"
+        New-Item -Path $tempDir -ItemType Directory -Force | Out-Null
+        $msiUrl = "https://download.anydesk.com/AnyDesk.msi"
+        $msiPath = Join-Path $tempDir "AnyDesk.msi"
+        $installed = $false
+
+        # --- محاولات التثبيت (MSI, Winget, Choco) ---
+        # (ابقاء منطق التثبيت السابق لضمان النجاح)
+        if (Invoke-Download -url $msiUrl -outPath $msiPath) {
+            Write-Host "Installing AnyDesk MSI via msiexec..."
+            $msiProcess = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i", "`"$msiPath`"", "/qn", "/norestart" -PassThru
+            $msiProcess.WaitForExit(180000)
+            if ($msiProcess.ExitCode -eq 0) { $installed = $true; Write-Host "MSI installed successfully." }
+        }
+        if (-not $installed -and (Get-Command winget -ErrorAction SilentlyContinue)) {
+            Write-Host "Attempting winget install..."
+            $p = Start-Process -FilePath "winget" -ArgumentList "install --silent --accept-package-agreements --accept-source-agreements AnyDesk.AnyDesk" -PassThru -NoNewWindow
+            $p.WaitForExit(180000)
+            if ($p.ExitCode -eq 0) { $installed = $true; Write-Host "winget installed successfully." }
+        }
+        if (-not $installed -and (Get-Command choco -ErrorAction SilentlyContinue)) {
+            Write-Host "Attempting choco install..."
+            $p = Start-Process -FilePath "choco" -ArgumentList "install anydesk -y --no-progress" -PassThru -NoNewWindow
+            $p.WaitForExit(240000)
+            if ($p.ExitCode -eq 0) { $installed = $true; Write-Host "choco installed successfully." }
+        }
+        
+        # 4) Locate AnyDesk.exe 
+        $ADExePath = Find-AnyDeskExe
+        
+        if (-not $ADExePath) {
+            Write-Warning "AnyDesk installation failed or executable not found. Proceeding with Tailscale/RDP."
+            echo "ANYDESK_ID=NOT_AVAILABLE" | Out-File -FilePath $env:GITHUB_ENV -Append
+            exit 0
+        }
+        
+        # --- تطبيق منطق الوصول غير المراقب القسري (منطقك الجديد) ---
+        Write-Host "🔧 تفعيل الوصول التلقائي (Unattended Access) قسرياً..."
+        
+        # 5.1) تثبيت الخدمة وتشغيلها (ضمان وجود الخدمة)
+        $adService = Get-Service -Name "AnyDesk" -ErrorAction SilentlyContinue
+        if (-not $adService) {
+            Write-Host "📦 تشغيل خدمة AnyDesk لأول مرة (Install Service)..."
+            # تشغيل الملف التنفيذي مع flags تثبيت الخدمة
+            Start-Process -FilePath "$ADExePath" -ArgumentList "--install-service" -Wait -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 5
+        }
+        
+        Write-Host "🚀 التأكد من بدء خدمة AnyDesk..."
+        Start-Service -Name "AnyDesk" -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 3
+
+        # 5.2) تعيين كلمة المرور عبر CLI (المحاولة الأولى)
+        try {
+            Write-Host "Attempting to set AnyDesk password via CLI..."
+            & "$ADExePath" --set-password $env:ANYDESK_PASS 2>&1 | Out-Null
+            Start-Sleep -Seconds 3
+        } catch {
+            Write-Warning "Setting AnyDesk password via CLI failed. Relying on Registry."
+        }
+        
+        # 5.3) تفعيل الوصول التلقائي قسرياً عبر الريجستري (الأكثر فعالية)
+        try {
+            $regPath = "HKLM:\SOFTWARE\AnyDesk"
+            if (!(Test-Path $regPath)) { New-Item -Path $regPath | Out-Null }
+
+            # 1. تفعيل الوصول غير المراقب
+            Set-ItemProperty -Path $regPath -Name "EnableUnattendedAccess" -Type DWord -Value 1
+            
+            # 2. حفظ كلمة المرور في الـ Registry (ملاحظة: صيغة الـ PasswordHash قد تختلف، لكن هذه محاولة)
+            # بما أن PowerShell لا يقوم بتشفير الهاش بنفس طريقة AnyDesk، سنعتمد على الأمر --set-password 
+            # ولكن سنقوم بتعيين الـ SecurityPolicy على 1 (للسماح بكلمة المرور) كإجراء وقائي.
+            Set-ItemProperty -Path $regPath -Name "SecurityPolicy" -Type DWord -Value 1 -ErrorAction SilentlyContinue 
+
+            Write-Host "✅ تم تفعيل إعدادات الوصول التلقائي في الريجستري."
+        } catch {
+            Write-Warning "⚠ فشل في ضبط إعدادات الريجستري للوصول التلقائي."
+        }
+        
+        # 5.4) إعادة تشغيل الخدمة لتطبيق جميع الإعدادات
+        $AnyDeskService = Get-Service -Name AnyDesk -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($AnyDeskService) {
+            Write-Host "Restarting AnyDesk Service to apply all configurations..."
+            Restart-Service -Name AnyDesk -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 5
+        }
+
+        # 6) Get AnyDesk ID with retries (best-effort)
+        $ADID = $null
+        $retries = 0
+        Write-Host "Attempting to retrieve AnyDesk ID (Max 60s Wait)..."
+        while (-not $ADID -and $retries -lt 12) {
+            try {
+                $raw = (& "$ADExePath" --get-id 2>$null | Out-String).Trim()
+                if ($raw -match '\d{6,12}') { $ADID = $Matches[0] } else { $ADID = $raw.Trim() }
+            } catch {}
+            if (-not $ADID) { Start-Sleep -Seconds 5 }
+            $retries++
+        }
+
+        if ($ADID -and $ADID -ne 'True' -and $ADID -ne 'False') {
+            Write-Host "SUCCESS: AnyDesk ID: $ADID"
+            echo "ANYDESK_ID=$ADID" | Out-File -FilePath $env:GITHUB_ENV -Append
+        } else {
+            Write-Warning "Could not retrieve valid AnyDesk ID. Continuing."
+            echo "ANYDESK_ID=NOT_AVAILABLE" | Out-File -FilePath $env:GITHUB_ENV -Append
+        }
+        
+      shell: powershell
+
+    # 7. تكوين RDP و إنشاء المستخدم
+    - name: Configure RDP User and Set Password
+      run: |
+        $password = $env:RDP_PASS
+        $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+
+        if (-not (Get-LocalUser -Name "$env:RDP_USER" -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name "$env:RDP_USER" -Password $securePass -AccountNeverExpires
+        }
+
+        Add-LocalGroupMember -Group "Administrators" -Member "$env:RDP_USER"
+        Add-LocalGroupMember -Group "Remote Desktop Users" -Member "$env:RDP_USER"
+
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+        Restart-Service -Name TermService -Force
+      shell: powershell
+
+    # 8. طباعة بيانات الاتصال
+    - name: Display Connection Details
+      run: |
+        $ADID = $env:ANYDESK_ID
+        if (-not $ADID) { $ADID = "NOT_AVAILABLE" }
+
+        Write-Output "--------------------------------------------------------"
+        Write-Output "          SHADOWHACKER-GOD: DUAL CONNECTION INFO         "
+        Write-Output "--------------------------------------------------------"
+        Write-Output "   A. RDP Connection via Tailscale (Primary):"
+        Write-Output "      - User: $env:RDP_USER"
+        Write-Output "      - RDP Password: ${{ secrets.RDP_PASSWORD }}"
+        Write-Output "      - IP/Address: $env:TAILSCALE_IP"
+        Write-Output "--------------------------------------------------------"
+        Write-Output "   B. AnyDesk Connection (Fallback):"
+        Write-Output "      - AnyDesk ID: $ADID"
+        Write-Output "      - AnyDesk Password: ${{ secrets.ANYDESK_PASSWORD }}"
+        Write-Output "      **Note: If ID is 'NOT_AVAILABLE', use Tailscale only.**"
+        Write-Output "--------------------------------------------------------"
+      shell: powershell
+
+    # 9. حلقة الحفظ والإغلاق
+    - name: Keep Alive and Data Sync Loop (Safe Shutdown)
+      run: |
+        Start-Sleep -Seconds 21000
+        Write-Host "--- Executing final data save to Gist (5h 50m mark) ---"
+        python ./scripts/save_data.py $env:GIST_ID $env:GIST_TOKEN $env:PERSISTENT_DIR
+        Write-Host "Data saved successfully. Shutting down. Auto-restart imminent
