@@ -17,7 +17,7 @@ jobs:
 
     # 1. إعداد المتغيرات السرية والبيئة
     - name: Setup environment variables
-      shell: powershell
+      shell: powershell # هنا يتم تعريف الـ shell
       run: |
         Write-Host "--- Loading Environment Variables and Secrets ---"
         echo "RUSTDESK_PASS=${{ secrets.RUSTDESK_PASSWORD }}" | Out-File -FilePath $env:GITHUB_ENV -Append
@@ -45,25 +45,21 @@ jobs:
 
     # 4. تثبيت Tailscale (الطريقة الاحتياطية الموثوقة)
     - name: Install and Authenticate Tailscale
-      shell: pwsh
+      shell: powershell
       run: |
         Write-Host "=== Installing Tailscale for Backup Access ==="
-        # Tailscale يتطلب مفتاح مصادقة
         $tsAuthKey = "${{ secrets.TAILSCALE_AUTH_KEY }}" 
         if (-not $tsAuthKey) {
             Write-Warning "TAILSCALE_AUTH_KEY secret is missing. Skipping Tailscale."
-            exit 0 # لا تفشل، فقط تخطى
+            exit 0
         }
         
-        # تنزيل وتثبيت Tailscale
         Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup.exe" -OutFile "$env:TEMP\tailscale-setup.exe"
         Start-Process "$env:TEMP\tailscale-setup.exe" -ArgumentList "/S" -Wait
         
-        # المصادقة وبدء التشغيل
         Write-Host "Authenticating Tailscale..."
         & "C:\Program Files\Tailscale\tailscale.exe" up --authkey $tsAuthKey --accept-routes --advertise-routes
         
-        # انتظار 10 ثوانٍ للحصول على الـ IP
         Start-Sleep -Seconds 10
         $tsIP = (& "C:\Program Files\Tailscale\tailscale.exe" ip -4).Trim()
         
@@ -74,7 +70,6 @@ jobs:
         } else {
             Write-Warning "Failed to retrieve a valid Tailscale IP."
         }
-      shell: powershell
 
     # 5. تثبيت RustDesk (استخدام MSI)
     - name: Install RustDesk (MSI method)
@@ -97,7 +92,6 @@ jobs:
         $timeout = 180
         while (-not $proc.HasExited -and $sw.Elapsed.TotalSeconds -lt $timeout) { Start-Sleep -Seconds 2 }
         
-        # تحديد المسار التنفيذي (هذا الجزء يُعيد استخدام المنطق الناجح من سكريبتك)
         $candidates = @("$env:ProgramFiles\RustDesk\rustdesk.exe", "$env:ProgramFiles(x86)\RustDesk\rustdesk.exe")
         $rustdeskExe = $null
         foreach ($p in $candidates) { if (Test-Path $p) { $rustdeskExe = $p; break } }
@@ -116,7 +110,6 @@ jobs:
         $exe = $env:RUSTDESK_EXE
         if (-not (Test-Path $exe)) { Write-Error "rustdesk.exe missing: $exe"; exit 1 }
 
-        # محاولة تثبيت الخدمة وبدء تشغيلها
         try { Start-Process -FilePath $exe -ArgumentList "--install-service" -NoNewWindow -Wait -ErrorAction SilentlyContinue } catch {}
         
         $svcNameCandidates = @("RustDesk","rustdesk")
@@ -134,7 +127,6 @@ jobs:
             try { Start-Service -Name $foundSvc.Name -ErrorAction SilentlyContinue; Start-Sleep -Seconds 5 } catch {}
             Write-Host "Service final status: $(Get-Service -Name $foundSvc.Name | Select-Object -ExpandProperty Status)"
         }
-      shell: pwsh
 
     # 7. تكوين RustDesk واسترجاع ID (النهج الأكثر موثوقية)
     - name: Configure RustDesk Unattended Access and Retrieve ID (Robust)
@@ -150,11 +142,11 @@ jobs:
         & $exe --password $pass 2>&1 | Write-Host
         Start-Sleep -Seconds 8
 
-        # 2) Wait for ID by checking Service Config (LocalService is where ID often resides)
+        # 2) Wait for ID by checking Service Config and CLI
         $serviceConfigPath = "C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk.toml"
         $id = $null
         $attempts = 0
-        $maxAttempts = 90 # 90 attempts * 5s = 7.5 minutes total wait for ID
+        $maxAttempts = 90
         
         Write-Host "Waiting for ID by checking TOML config and CLI..."
         
@@ -210,17 +202,15 @@ jobs:
         Write-Output "      - Tailscale IP (الاحتياطي): $env:TAILSCALE_IP"
         Write-Output "      - Tailscale ملاحظة: يتطلب Tailscale على جهازك المحلي."
         Write-Output "--------------------------------------------------------"
-        Write-Output "استخدم Tailscale IP (إذا ظهر) كـ IP عادي في أي برنامج RDP (مثل mstsc)."
-        
+
     # 9. حفظ البيانات النهائية
     - name: Final Keep Alive Loop and Save data to Gist
       shell: pwsh
       run: |
         Write-Host "Keeping runner alive for 5h 50m..."
-        Start-Sleep -Seconds 21000 # 350 minutes
+        Start-Sleep -Seconds 21000
         
         Write-Host "--- Executing final data save to Gist ---"
-        # سيتم رفع rustdesk_id.txt و tailscale_ip.txt
         if (Test-Path ./scripts/save_data.py -and $env:GIST_ID -and $env:GIST_TOKEN) {
           python ./scripts/save_data.py $env:GIST_ID $env:GIST_TOKEN $env:PERSISTENT_DIR
         } else {
@@ -228,4 +218,3 @@ jobs:
         }
         
         Write-Host "Shutting down runner."
-      shell: pwsh
