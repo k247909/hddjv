@@ -1,6 +1,6 @@
 # SHADOWHACKER-GOD: RDP Workflow (Final Fixed Code: Encoding Error Solved)
 
-name: AEON-RDP-TAILSCALE-ANYDESK
+name: RDP2
 
 on:
   schedule:
