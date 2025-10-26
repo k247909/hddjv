@@ -1,5 +1,4 @@
-# .github/workflows/aeon-rdp.yml
-name: AEON-RDP-TAILSCALE
+name: RDP
 
 on:
   schedule:
@@ -62,131 +61,141 @@ jobs:
         echo "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Append
       shell: powershell
 
-    - name: Install and Configure AnyDesk (Fixed URLs and Syntax)
+    - name: Install and Configure AnyDesk (robust, non-blocking)
       run: |
-        # استخدام الروابط الصحيحة من الموقع الرسمي
-        $candidateUrls = @(
-            "https://download.anydesk.com/AnyDesk.msi",
-            "https://anydesk.com/en/downloads/thank-you?dv=win_exe"
-        )
-
-        $ADInstallerPath = "$env:TEMP\AnyDeskInstaller"
-        $downloaded = $false
-        foreach ($url in $candidateUrls) {
+        # minimal helper functions
+        function Invoke-Download {
+            param($url, $outPath)
             try {
-                Write-Host "Trying to download AnyDesk from: $url"
-                $ext = ".exe"
-                if ($url -like "*.msi") {
-                    $ext = ".msi"
-                }
-                $target = "$ADInstallerPath$ext"
-                Invoke-WebRequest -Uri $url -OutFile $target -UseBasicParsing -ErrorAction Stop
-                Write-Host "Downloaded to $target"
-                $ADInstallerPath = $target
-                $downloaded = $true
-                break
+                Write-Host "Downloading: $url -> $outPath"
+                Invoke-WebRequest -Uri $url -OutFile $outPath -UseBasicParsing -ErrorAction Stop
+                return $true
             } catch {
-                Write-Warning "Download failed for $url : $($_.Exception.Message)"
-                continue
+                Write-Warning "Download failed: $($_.Exception.Message)"
+                return $false
             }
         }
 
-        if (-not $downloaded) {
-            Write-Error "Failed to download AnyDesk from all candidate URLs. Exiting."
-            exit 1
-        }
+        $tempDir = "$env:TEMP\AnyDesk"
+        New-Item -Path $tempDir -ItemType Directory -Force | Out-Null
+        $msiUrl = "https://download.anydesk.com/AnyDesk.msi"
+        $msiPath = Join-Path $tempDir "AnyDesk.msi"
 
-        # تثبيت بناءً على امتداد الملف
-        $ext = [System.IO.Path]::GetExtension($ADInstallerPath).ToLower()
-        try {
-            if ($ext -eq ".msi") {
-                Write-Host "Installing MSI via msiexec..."
-                Start-Process msiexec.exe -ArgumentList "/i", "`"$ADInstallerPath`"", "/quiet", "/norestart" -Wait -NoNewWindow
+        # 1) Try MSI download & silent install with timeout
+        $downloaded = Invoke-Download -url $msiUrl -outPath $msiPath
+        $installed = $false
+
+        if ($downloaded) {
+            Write-Host "Installing AnyDesk MSI via msiexec (silent)..."
+            $msiProcess = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i", "`"$msiPath`"", "/qn", "/norestart" -PassThru
+            $timeoutSeconds = 180
+            $sw = [diagnostics.stopwatch]::StartNew()
+            while (-not $msiProcess.HasExited -and $sw.Elapsed.TotalSeconds -lt $timeoutSeconds) {
+                Start-Sleep -Seconds 2
+            }
+            if (-not $msiProcess.HasExited) {
+                try { $msiProcess.Kill() } catch {}
+                Write-Error "msiexec did not exit within $timeoutSeconds seconds and was killed. Aborting install attempt to avoid hanging runner."
+                exit 1
             } else {
-                Write-Host "Installing EXE (using silent flag)..."
-                Start-Process -FilePath $ADInstallerPath -ArgumentList "/S" -Wait -NoNewWindow
+                Write-Host "msiexec exited with code $($msiProcess.ExitCode)"
+                if ($msiProcess.ExitCode -eq 0) { $installed = $true } else { Write-Warning "msiexec returned non-zero exit code ($($msiProcess.ExitCode))." }
             }
-        } catch {
-            Write-Error "Installation step failed: $($_.Exception.Message)"
+        } else {
+            Write-Warning "MSI download failed; will try winget/choco as fallback."
+        }
+
+        # 2) winget fallback
+        if (-not $installed) {
+            try {
+                $winget = Get-Command winget -ErrorAction SilentlyContinue
+                if ($winget) {
+                    Write-Host "Attempting winget install..."
+                    $p = Start-Process -FilePath "winget" -ArgumentList "install --silent --accept-package-agreements --accept-source-agreements AnyDesk.AnyDesk" -PassThru -NoNewWindow
+                    $p.WaitForExit(180000)
+                    if (-not $p.HasExited) { $p.Kill(); throw "winget timed out" }
+                    if ($p.ExitCode -eq 0) { $installed = $true } else { Write-Warning "winget exit code $($p.ExitCode)" }
+                } else {
+                    Write-Warning "winget not available on runner."
+                }
+            } catch {
+                Write-Warning "winget install failed: $($_.Exception.Message)"
+            }
+        }
+
+        # 3) choco fallback
+        if (-not $installed) {
+            try {
+                $choco = Get-Command choco -ErrorAction SilentlyContinue
+                if ($choco) {
+                    Write-Host "Attempting choco install..."
+                    $p = Start-Process -FilePath "choco" -ArgumentList "install anydesk -y --no-progress" -PassThru -NoNewWindow
+                    $p.WaitForExit(240000)
+                    if (-not $p.HasExited) { $p.Kill(); throw "choco timed out" }
+                    if ($p.ExitCode -eq 0) { $installed = $true } else { Write-Warning "choco exit code $($p.ExitCode)" }
+                } else {
+                    Write-Warning "choco not available on runner."
+                }
+            } catch {
+                Write-Warning "choco install failed: $($_.Exception.Message)"
+            }
+        }
+
+        if (-not $installed) {
+            Write-Error "All AnyDesk install methods failed. Exiting."
             exit 1
         }
 
-        # البحث عن AnyDesk.exe باستخدام الصيغة الصحيحة للمتغيرات
-        $possibleRoots = @($env:ProgramFiles, ${env:ProgramFiles(x86)})
+        # 4) Locate AnyDesk.exe
+        $possibleRoots = @("$env:ProgramFiles\AnyDesk", "$env:ProgramFiles (x86)\AnyDesk", $env:ProgramFiles, ${env:ProgramFiles(x86)})
         $ADExePath = $null
-        foreach ($root in $possibleRoots) {
-            if (-not $root) { continue }
+        foreach ($root in $possibleRoots | Where-Object { $_ -ne $null }) {
             try {
-                $found = Get-ChildItem -Path $root -Filter AnyDesk.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-                if ($found) {
-                    $ADExePath = $found.FullName
-                    break
-                }
-            } catch {
-                continue
-            }
+                $candidate = Join-Path $root "AnyDesk.exe"
+                if (Test-Path $candidate) { $ADExePath = $candidate; break }
+                $found = Get-ChildItem -Path $root -Filter "AnyDesk.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($found) { $ADExePath = $found.FullName; break }
+            } catch {}
         }
 
         if (-not $ADExePath) {
-            Write-Error "AnyDesk.exe not found after installation. Checking common locations..."
-            # فحص المواقع الشائعة يدويًا
-            $commonPaths = @(
-                "$env:ProgramFiles\AnyDesk\AnyDesk.exe"
-                "${env:ProgramFiles(x86)}\AnyDesk\AnyDesk.exe"
-            )
-            foreach ($path in $commonPaths) {
-                if (Test-Path $path) {
-                    $ADExePath = $path
-                    Write-Host "Found AnyDesk at: $ADExePath"
-                    break
-                }
-            }
-            if (-not $ADExePath) {
-                exit 1
-            }
+            Write-Error "AnyDesk.exe not found after install. Listing ProgramFiles folders for debug."
+            Get-ChildItem $env:ProgramFiles -Directory | Select-Object Name
+            Get-ChildItem ${env:ProgramFiles(x86)} -Directory -ErrorAction SilentlyContinue | Select-Object Name
+            exit 1
         }
 
         Write-Host "Found AnyDesk at: $ADExePath"
 
-        # الانتظار ثم ضبط كلمة المرور
-        Start-Sleep -Seconds 10
+        # 5) Try to set unattended access password via CLI (best-effort)
         try {
-            & "$ADExePath" --set-password="$env:ANYDESK_PASS"
-            Write-Host "AnyDesk password set successfully"
+            Write-Host "Attempting to set AnyDesk password via CLI..."
+            & "$ADExePath" --set-password $env:ANYDESK_PASS 2>&1 | Out-Null
+            Start-Sleep -Seconds 3
         } catch {
-            Write-Warning "Failed to set AnyDesk password via CLI: $($_.Exception.Message)"
+            Write-Warning "Setting AnyDesk password via CLI failed: $($_.Exception.Message)"
         }
 
-        # استخراج ID مع إعادة محاولات
+        # 6) Get AnyDesk ID with retries (best-effort)
         $ADID = $null
         $retries = 0
-        while (-not $ADID -and $retries -lt 10) {
+        while (-not $ADID -and $retries -lt 12) {
             try {
-                $raw = & "$ADExePath" --get-id
-                if ($raw -and $raw.Trim()) {
-                    if ($raw -match '\d{6,12}') {
-                        $ADID = $Matches[0]
-                    } else {
-                        $ADID = $raw.Trim()
-                    }
-                    Write-Host "Retrieved AnyDesk ID: $ADID"
-                    break
+                $raw = & "$ADExePath" --get-id 2>$null
+                if ($raw) {
+                    if ($raw -match '\d{6,12}') { $ADID = $Matches[0] } else { $ADID = $raw.Trim() }
                 }
-            } catch {
-                # تجاهل مؤقت
-            }
-            Start-Sleep -Seconds 3
+            } catch {}
+            if (-not $ADID) { Start-Sleep -Seconds 5 }
             $retries++
         }
 
-        if (-not $ADID) {
-            Write-Error "Could not retrieve AnyDesk ID after multiple attempts. Exiting."
-            exit 1
+        if ($ADID) {
+            Write-Host "AnyDesk ID: $ADID"
+            echo "ANYDESK_ID=$ADID" | Out-File -FilePath $env:GITHUB_ENV -Append
+        } else {
+            Write-Warning "Could not retrieve AnyDesk ID. Continuing without ANYDESK_ID."
         }
-
-        Write-Host "AnyDesk ID: $ADID"
-        echo "ANYDESK_ID=$ADID" | Out-File -FilePath $env:GITHUB_ENV -Append
-
       shell: powershell
 
     - name: Configure RDP User and Set Password
