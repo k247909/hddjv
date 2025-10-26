@@ -1,4 +1,4 @@
-# SHADOWHACKER-GOD: RDP Workflow (ULTIMATE STABILITY - Force AnyDesk Service)
+# SHADOWHACKER-GOD: RDP Workflow (ULTIMATE FIX: Deferred AnyDesk ID Retrieval)
 
 name: AEON-RDP-TAILSCALE-ANYDESK
 
@@ -69,54 +69,32 @@ jobs:
         echo "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Append
       shell: powershell
       
-    # 6. تثبيت وتكوين AnyDesk (FIXED: التشغيل القسري للخدمة + الانتظار للحصول على ID)
-    - name: Install and Configure AnyDesk (Force Service Start & Wait for ID)
+    # 6. تثبيت وتكوين AnyDesk (بدء التشغيل وتعيين كلمة المرور فقط - بدون انتظار ID)
+    - name: Install and Configure AnyDesk (Start & Set Password)
       run: |
         $ADUrl = "https://download.anydesk.com/AnyDesk.exe" 
-        $ADExePath = "$env:TEMP\AnyDesk.exe" # نستخدم هذا المسار للتشغيل المحمول
+        $ADExePath = "$env:TEMP\AnyDesk.exe"
         
         # 1. تنزيل AnyDesk.exe
         Write-Host "--- Downloading AnyDesk.exe ---"
         Invoke-WebRequest -Uri $ADUrl -OutFile $ADExePath
         
-        # 2. بدء تشغيل AnyDesk كخدمة محمولة قسرية (الحل الحاسم)
-        Write-Host "--- Starting AnyDesk as Forced Portable Service ---"
-        # تشغيل AnyDesk في وضع الخدمة (توليد ID/ اتصال)
+        # 2. حذف ملفات التكوين القديمة
+        Write-Host "--- Clearing old AnyDesk configuration files (Force new ID generation) ---"
+        Remove-Item "$env:ProgramData\AnyDesk\system.conf" -Force -ErrorAction SilentlyContinue
+        Remove-Item "$env:ProgramData\AnyDesk\*" -Recurse -Force -Exclude "ad_svc_user.json" -ErrorAction SilentlyContinue 
+        Start-Sleep -Seconds 3
+
+        # 3. بدء تشغيل AnyDesk كخدمة محمولة قسرية في الخلفية
+        Write-Host "--- Starting AnyDesk as Forced Portable Service (Background) ---"
         Start-Process -FilePath $ADExePath -ArgumentList "--start-service" -PassThru | Out-Null
-        Start-Sleep -Seconds 10 # إعطاء البرنامج وقتاً للبدء
-        
-        # 3. تعيين كلمة المرور للوصول غير المراقب
+        Start-Process -FilePath $ADExePath -PassThru | Out-Null 
+        Start-Sleep -Seconds 15 # إعطاء البرنامج وقتاً للبدء
+
+        # 4. تعيين كلمة المرور للوصول غير المراقب
         Write-Host "--- Setting Unattended Access Password ---"
         & $ADExePath --set-password $env:ANYDESK_PASS
         Start-Sleep -Seconds 5
-        
-        # 4. استخراج مُعرِّف AnyDesk (مع حلقة انتظار للاتصال بالإنترنت)
-        Write-Host "--- Attempting to retrieve AnyDesk ID (Max 150s Wait) ---"
-        $ADID = $null
-        $retries = 0
-        while (-not $ADID -and $retries -lt 30) { # 30 محاولة * 5 ثواني = 150 ثانية
-            $ADID = (& $ADExePath --get-id | Out-String).Trim()
-            if ($ADID -match '\d{9}') {
-                $ADID = ($ADID -match '\d{9}').Value
-            } else {
-                $ADID = $null
-            }
-            if (-not $ADID) {
-                Write-Host "Retry $retries/30: AnyDesk ID not found. Waiting 5s for network connection..."
-                Start-Sleep -Seconds 5
-            } else {
-                Write-Host "AnyDesk ID found: $ADID"
-                break
-            }
-            $retries++
-        }
-        
-        if (-not $ADID) {
-            Write-Error "Could not retrieve AnyDesk ID after 30 attempts. Check firewall or network connectivity issues."
-            exit 1
-        }
-        
-        echo "ANYDESK_ID=$ADID" | Out-File -FilePath $env:GITHUB_ENV -Append
         
       shell: powershell
 
@@ -137,7 +115,42 @@ jobs:
         Restart-Service -Name TermService -Force
       shell: powershell
 
-    # 8. طباعة بيانات الاتصال
+    # 8. **خطوة جديدة**: الحصول على ID (بعد استقرار الشبكة بالكامل)
+    - name: Retrieve AnyDesk ID (Final Attempt after Network Stabilization)
+      run: |
+        $ADExePath = "$env:TEMP\AnyDesk.exe"
+        Write-Host "--- Attempting to retrieve AnyDesk ID (Max 200s Wait - Deferred) ---"
+        $ADID = $null
+        $retries = 0
+        while (-not $ADID -and $retries -lt 40) { # 40 محاولة * 5 ثواني = 200 ثانية
+            $IDRaw = (& $ADExePath --get-id | Out-String).Trim()
+            if ($IDRaw -match '\d{9,10}') {
+                $ADID = ($IDRaw -match '\d{9,10}').Value
+            } else {
+                $ADID = $null
+            }
+            
+            if (-not $ADID) {
+                Write-Host "Retry $retries/40: AnyDesk ID not found. Waiting 5s for network connection..."
+                Start-Sleep -Seconds 5
+            } else {
+                Write-Host "SUCCESS: AnyDesk ID found: $ADID"
+                break
+            }
+            $retries++
+        }
+        
+        if (-not $ADID) {
+            Write-Error "CRITICAL FAILURE: Could not retrieve AnyDesk ID after 40 attempts. Network connection to AnyDesk servers failed or is blocked."
+            # لا نخرج من السير العمل، لكن نضع قيمة "غير متوفر"
+            echo "ANYDESK_ID=NOT_AVAILABLE" | Out-File -FilePath $env:GITHUB_ENV -Append
+        } else {
+            echo "ANYDESK_ID=$ADID" | Out-File -FilePath $env:GITHUB_ENV -Append
+        }
+        
+      shell: powershell
+
+    # 9. طباعة بيانات الاتصال
     - name: Display Connection Details
       run: |
         Write-Host "--------------------------------------------------------"
@@ -151,10 +164,11 @@ jobs:
         Write-Host "   B. اتصال AnyDesk (الاحتياطي/المباشر):"
         Write-Host "      - مُعرِّف AnyDesk (ID): $env:ANYDESK_ID"
         Write-Host "      - كلمة مرور AnyDesk (Password): ${{ secrets.ANYDESK_PASSWORD }}"
+        Write-Host "      **ملاحظة: إذا كان ID هو 'NOT_AVAILABLE'، استخدم Tailscale**"
         Write-Host "--------------------------------------------------------"
       shell: powershell
 
-    # 9. حلقة الحفظ والإغلاق (للحفظ الآمن قبل 5h 50m)
+    # 10. حلقة الحفظ والإغلاق (للحفظ الآمن قبل 5h 50m)
     - name: Keep Alive and Data Sync Loop (Safe Shutdown)
       run: |
         Start-Sleep -Seconds 21000 
