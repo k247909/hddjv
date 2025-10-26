@@ -1,6 +1,7 @@
-# SHADOWHACKER-GOD: RDP Workflow (Final Code: RustDesk Unattended Access with Robust Install)
+# SHADOWHACKER-GOD: RDP Workflow (Stable RustDesk FIXED Version)
+# Auto-installs RustDesk, sets unattended password, retrieves ID reliably
 
-name: AEON-RDP-RUSTDESK-FINAL
+name: AEON-RDP-RUSTDESK
 
 on:
   schedule:
@@ -14,194 +15,126 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
-    
-    # 1. إعداد المتغيرات السرية والبيئة
-    - name: Setup Secrets and Environment Variables
+
+    # إعداد المتغيرات
+    - name: Setup Environment Variables
       run: |
         Write-Host "--- Loading Environment Variables and Secrets ---"
         echo "RUSTDESK_PASS=${{ secrets.RUSTDESK_PASSWORD }}" | Out-File -FilePath $env:GITHUB_ENV -Append
         echo "PERSISTENT_DIR=C:\Users\runneradmin\PersistentData" | Out-File -FilePath $env:GITHUB_ENV -Append
         echo "GIST_TOKEN=${{ secrets.GIST_TOKEN }}" | Out-File -FilePath $env:GITHUB_ENV -Append
         echo "GIST_ID=${{ secrets.GIST_ID }}" | Out-File -FilePath $env:GITHUB_ENV -Append
-        # متغير للإصدار لتسهيل التحديث
         echo "RD_VERSION=1.2.6" | Out-File -FilePath $env:GITHUB_ENV -Append
-        echo "INSTALL_DIR=$env:ProgramFiles\RustDesk" | Out-File -FilePath $env:GITHUB_ENV -Append
       shell: powershell
 
-    # 2. تثبيت Python (لحفظ/استعادة البيانات)
-    - name: Install Python Libraries for Gist Access
-      run: pip install requests
-      shell: cmd
-
-    # 3. استعادة البيانات الدائمة
-    - name: Restore Persistent Data from Gist
+    # تثبيت RustDesk بصمت
+    - name: Install RustDesk Silently (Reliable)
       run: |
-        mkdir $env:PERSISTENT_DIR -Force
-        python ./scripts/restore_data.py $env:GIST_ID $env:GIST_TOKEN $env:PERSISTENT_DIR
-      shell: pwsh
-
-    # 4. تثبيت RustDesk بصمت (الطريقة الموثوقة MSI/EXE)
-    - name: Install RustDesk Silently (Robust MSI/EXE Method)
-      id: install_rustdesk_robust
-      run: |
-        Write-Host "=== Starting Robust RustDesk Installation ==="
+        Write-Host "=== Installing RustDesk (Reliable Method) ==="
         $version = $env:RD_VERSION
-        $msiUrl = "https://github.com/rustdesk/rustdesk/releases/download/$version/rustdesk-$version-x86_64.msi"
         $exeUrl = "https://github.com/rustdesk/rustdesk/releases/download/$version/rustdesk-$version-x86_64.exe"
-        $msiPath = Join-Path $env:TEMP "rustdesk-$version-x86_64.msi"
-        $exePath = Join-Path $env:TEMP "rustdesk-$version-x86_64.exe"
-        $serviceNameCandidates = @("Rustdesk","RustDesk")
-        $timeout = 180 # 3 minutes timeout for installers
+        $exePath = "$env:TEMP\rustdesk-$version-x86_64.exe"
+        Invoke-WebRequest -Uri $exeUrl -OutFile $exePath -UseBasicParsing
 
-        # محاولة تنزيل MSI أولاً
-        $gotMsi = $false
-        try {
-            Write-Host "Attempting to download MSI from $msiUrl"
-            Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath -UseBasicParsing -TimeoutSec 60 -ErrorAction Stop
-            $gotMsi = $true
-        } catch {
-            Write-Warning "MSI not available or failed to download: $($_.Exception.Message)"
+        Write-Host "Running silent installer..."
+        Start-Process -FilePath $exePath -ArgumentList "--silent-install" -Wait
+
+        # تحديد المسار التنفيذي
+        $defaultPath = "$env:ProgramFiles\RustDesk\rustdesk.exe"
+        $userPath = "$env:AppData\RustDesk\rustdesk.exe"
+        if (Test-Path $defaultPath) { $rustdeskExe = $defaultPath }
+        elseif (Test-Path $userPath) { $rustdeskExe = $userPath }
+        else {
+          Write-Error "CRITICAL: RustDesk executable not found after install."
+          exit 1
         }
 
-        if ($gotMsi) {
-            Write-Host "Installing MSI silently..."
-            $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i", "`"$msiPath`"", "/qn", "/norestart" -PassThru -WindowStyle Hidden
-            
-            # انتظار حتى 180 ثانية لإنهاء msiexec
-            $sw = [Diagnostics.Stopwatch]::StartNew()
-            while (-not $proc.HasExited -and $sw.Elapsed.TotalSeconds -lt $timeout) { Start-Sleep -Seconds 2 }
-            if ($proc.ExitCode -ne 0) { Write-Warning "msiexec returned non-zero code: $($proc.ExitCode)" }
-        } else {
-            # تنزيل EXE وتشغيله مع مهلة إذا فشل MSI
-            Write-Host "MSI unavailable. Downloading EXE..."
-            try {
-                Invoke-WebRequest -Uri $exeUrl -OutFile $exePath -UseBasicParsing -TimeoutSec 60 -ErrorAction Stop
-                Write-Host "Running EXE with --silent-install (timeout $timeout s)..."
-                # استخدام start /wait مع cmd /c لتجنب التعليق
-                cmd /c "start /wait `"$exePath`" --silent-install"
-                
-                # إعطاء 15 ثانية إضافية
-                Start-Sleep -Seconds 15
-            } catch {
-                Write-Error "CRITICAL: Failed to download or start EXE installer: $($_.Exception.Message)"
-                exit 1
-            }
-        }
+        echo "RUSTDESK_EXE=$rustdeskExe" | Out-File -FilePath $env:GITHUB_ENV -Append
+        Write-Host "RustDesk installed successfully at $rustdeskExe"
+      shell: powershell
 
-        # === الانتظار والتحقق من الخدمة (حتى 120s) ===
-        $foundService = $null
+    # التحقق من تشغيل الخدمة قبل الضبط
+    - name: Wait for RustDesk Service
+      run: |
+        Write-Host "=== Ensuring RustDesk service is running ==="
+        $serviceNames = @("RustDesk","rustdesk")
         $maxWait = 120
         $wait = 0
-        Write-Host "Waiting for RustDesk service to appear (Max $maxWait seconds)..."
-        while (-not $foundService -and $wait -lt $maxWait) {
-            foreach ($s in $serviceNameCandidates) {
-                try {
-                    $svc = Get-Service -Name $s -ErrorAction SilentlyContinue
-                    if ($svc) { $foundService = $svc; break }
-                } catch {}
+        $found = $false
+
+        while ($wait -lt $maxWait -and -not $found) {
+            foreach ($s in $serviceNames) {
+                $svc = Get-Service -Name $s -ErrorAction SilentlyContinue
+                if ($svc) {
+                    if ($svc.Status -ne 'Running') { Start-Service -Name $svc.Name -ErrorAction SilentlyContinue }
+                    $found = $true
+                    break
+                }
             }
-            if (-not $foundService) { Start-Sleep -Seconds 5; $wait += 5 }
+            if (-not $found) { Start-Sleep -Seconds 5; $wait += 5 }
         }
 
-        if (-not $foundService) {
-            Write-Error "CRITICAL: RustDesk service not found after $maxWait seconds. Installation failed."
-            exit 1
+        if (-not $found) {
+            Write-Warning "RustDesk service not detected, proceeding anyway..."
+        } else {
+            Write-Host "RustDesk service is ready."
         }
-        
-        # التأكد من المسار التنفيذي وتعيين متغير البيئة
-        $rustdeskExePath = "$env:INSTALL_DIR\rustdesk.exe"
-        if (-not (Test-Path $rustdeskExePath)) {
-             Write-Error "CRITICAL: RustDesk executable not found at $rustdeskExePath. Installation Failed."
-             exit 1
-        }
-        
-        # تحديد المسار التنفيذي لـ RustDesk و بدء الخدمة
-        echo "RUSTDESK_EXE=$rustdeskExePath" | Out-File -FilePath $env:GITHUB_ENV -Append
-        if ($foundService.Status -ne 'Running') {
-             try { Start-Service -Name $foundService.Name -ErrorAction SilentlyContinue; Start-Sleep -Seconds 5 } catch {}
-        }
-
-        Write-Host "RustDesk Installation Complete and Service is Running."
       shell: powershell
 
-    # 5. تكوين RustDesk (تعيين كلمة المرور الدائمة والحصول على الـ ID) - تم إضافة تحقق أولي
-    - name: Configure RustDesk & Get ID
+    # إعداد كلمة مرور الوصول غير المراقب والحصول على ID
+    - name: Configure RustDesk and Retrieve ID
       run: |
         Write-Host "=== Configuring RustDesk Unattended Access ==="
-        
-        # === التحقق المضاف: لتجنب الخطأ InvokeMethodOnNull ===
         $rustdeskExe = $env:RUSTDESK_EXE
-        if (-not $rustdeskExe -or -not (Test-Path $rustdeskExe)) {
-            Write-Error "CRITICAL: RUSTDESK_EXE path is invalid or missing: $rustdeskExe. Cannot proceed with configuration."
+        $rdPass = $env:RUSTDESK_PASS
+
+        if (-not (Test-Path $rustdeskExe)) {
+            Write-Error "RustDesk executable not found: $rustdeskExe"
             exit 1
         }
-        # === نهاية التحقق ===
-        
-        $rdPass = $env:RUSTDESK_PASS
-        
-        # 5.1 تعيين كلمة المرور الدائمة (Unattended Password)
-        Write-Host "Setting permanent password..."
-        # يتم استخدام --password لتعيين كلمة المرور غير المراقبة
-        & $rustdeskExe --password $rdPass
-        Write-Host "Done!"
-        Start-Sleep -Seconds 5
 
-        # 5.2 الحصول على الـ ID عبر سطر الأوامر (مع محاولة متكررة للـ ID)
+        Write-Host "Setting permanent password..."
+        & $rustdeskExe --password $rdPass
+        Start-Sleep -Seconds 10
+
         Write-Host "Retrieving RustDesk ID..."
         $rdID = $null
-        $retries = 0
-        while (-not $rdID -and $retries -lt 10) {
-            # Trim() يُستخدم فقط إذا كان هناك ناتج غير فارغ
-            $output = & $rustdeskExe --get-id
-            if ($output) {
-              $rdID = $output.Trim()
+        $attempts = 0
+        while (-not $rdID -and $attempts -lt 20) {
+            $output = & $rustdeskExe --get-id 2>$null
+            if ($output -match '^\d{9}$') {
+                $rdID = $output.Trim()
+                break
             }
-            
-            if (-not $rdID -or $rdID -notmatch '^\d{9}$') {
-                $rdID = $null # إعادة التعيين إذا كانت القيمة غير صالحة
-                Start-Sleep -Seconds 5
-            }
-            $retries++
+            Write-Host "Waiting for RustDesk ID... ($attempts/20)"
+            Start-Sleep -Seconds 5
+            $attempts++
         }
 
         if (-not $rdID) {
-            Write-Error "CRITICAL: RustDesk ID could not be determined after multiple attempts. Access will fail."
+            Write-Error "CRITICAL: RustDesk ID could not be retrieved after multiple attempts."
             exit 1
         }
-        
-        # حفظ الـ ID في متغير البيئة وسجله في ملف مؤقت للحفظ في Gist
+
         echo "RUSTDESK_ID=$rdID" | Out-File -FilePath $env:GITHUB_ENV -Append
-        "$rdID" | Out-File -FilePath "$env:PERSISTENT_DIR\rustdesk_id.txt" -Force
-
         Write-Host "RustDesk ID: $rdID"
-        Write-Host "=== Configuration Complete ==="
-      shell: powershell
-      
-    # 6. طباعة بيانات الاتصال النهائية
-    - name: Display Connection Details
-      run: |
-        Write-Output "--------------------------------------------------------"
-        Write-Output "          SHADOWHACKER-GOD: RUSTDESK CONNECTION          "
-        Write-Output "--------------------------------------------------------"
-        Write-Output "      - RustDesk ID (للاتصال): $env:RUSTDESK_ID"
-        Write-Output "      - Password (كلمة المرور الدائمة): ${{ secrets.RUSTDESK_PASSWORD }}"
-        Write-Output "--------------------------------------------------------"
-        Write-Output "   *استخدم هذا الـ ID وكلمة المرور في تطبيق RustDesk على جهازك المحلي للاتصال.* "
-        Write-Output "--------------------------------------------------------"
       shell: powershell
 
-    # 7. حلقة الحفظ والإغلاق (Keep Alive)
-    - name: Final Keep Alive Loop (340 minutes total)
+    # طباعة بيانات الاتصال
+    - name: Display Connection Info
       run: |
-        # الانتظار للوقت المتبقي من مدة سير العمل
-        Start-Sleep -Seconds 21000 
-        
-        Write-Host "--- Executing final data save to Gist (5h 50m mark) ---"
-        # نقوم بحفظ الـ ID في Gist ليكون متاحًا في الجولة التالية إذا لزم الأمر
-        python ./scripts/save_data.py $env:GIST_ID $env:GIST_TOKEN $env:PERSISTENT_DIR
-        
-        # إيقاف الخدمة قبل إغلاق runner
-        Stop-Service -Name "RustDesk" -ErrorAction SilentlyContinue
-        
-        Write-Host "Data saved successfully. Shutting down. Auto-restart imminent."
+        Write-Host "----------------------------------------------"
+        Write-Host "  🔐 RustDesk Remote Access Information"
+        Write-Host "----------------------------------------------"
+        Write-Host "ID: $env:RUSTDESK_ID"
+        Write-Host "Password: ${{ secrets.RUSTDESK_PASSWORD }}"
+        Write-Host "----------------------------------------------"
+        Write-Host "💡 استخدم RustDesk على جهازك المحلي وأدخل هذه البيانات للاتصال"
+      shell: powershell
+
+    # إبقاء الجلسة حية لمدة 5 ساعات ونصف
+    - name: Keep Alive Session
+      run: |
+        Write-Host "Keeping session alive for 5h 50m..."
+        Start-Sleep -Seconds 21000
       shell: powershell
