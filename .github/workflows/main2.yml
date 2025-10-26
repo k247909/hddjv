@@ -1,5 +1,4 @@
-# SHADOWHACKER-GOD: RDP Workflow (Final Fixed Code: Full AnyDesk Install + Deferred ID)
-
+# .github/workflows/aeon-rdp.yml
 name: RDP-ANYDESK
 
 on:
@@ -15,7 +14,6 @@ jobs:
     steps:
     - uses: actions/checkout@v3
 
-    # 1. إعداد المتغيرات السرية والبيئة
     - name: Setup Secrets and Environment Variables
       run: |
         echo "RDP_PASS=${{ secrets.RDP_PASSWORD }}" | Out-File -FilePath $env:GITHUB_ENV -Append
@@ -26,19 +24,16 @@ jobs:
         echo "GIST_ID=${{ secrets.GIST_ID }}" | Out-File -FilePath $env:GITHUB_ENV -Append
       shell: powershell
 
-    # 2. تثبيت مكتبة requests
     - name: Install Python Libraries for Gist Access
       run: pip install requests
       shell: cmd
 
-    # 3. استعادة البيانات الدائمة من Gist
     - name: Restore Persistent Data from Gist
       run: |
         mkdir $env:PERSISTENT_DIR -Force
         python ./scripts/restore_data.py $env:GIST_ID $env:GIST_TOKEN $env:PERSISTENT_DIR
       shell: pwsh
 
-    # 4. تثبيت Tailscale (Stable MSI Method)
     - name: Install Tailscale (Stable MSI Method)
       run: |
         $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
@@ -49,8 +44,7 @@ jobs:
         Start-Sleep -Seconds 5
       shell: powershell
 
-    # 5. توصيل Tailscale والحصول على IP
-    - name: Establish Tailscale Connection & Get IP
+    - name: Establish Tailscale Connection & Get IP (Path Fixed)
       run: |
         $TailscaleExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
         & $TailscaleExe up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=AEON-RDP-WIN-$env:GITHUB_RUN_ID
@@ -68,68 +62,130 @@ jobs:
         echo "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Append
       shell: powershell
 
-    # 6. تنزيل وتثبيت AnyDesk بالكامل (خطوة منفصلة)
-    - name: Download and Install AnyDesk (Full Install)
+    - name: Install and Configure AnyDesk (Fixed - Use MSI Only)
       run: |
-        $candidateUrls = @("https://download.anydesk.com/AnyDesk.exe") # نركز على EXE لأنه الأكثر موثوقية هنا
-        $ADInstallerPath = "$env:TEMP\AnyDeskSetup.exe"
-        $downloaded = $false
+        # استخدام MSI فقط لأنه أكثر استقرارًا في البيئات غير التفاعلية
+        $msiUrl = "https://download.anydesk.com/AnyDesk.msi"
+        $installerPath = "$env:TEMP\AnyDesk.msi"
         
-        # محاولة التنزيل
+        Write-Host "Downloading AnyDesk MSI from: $msiUrl"
         try {
-            Write-Host "Trying to download AnyDesk from: $candidateUrls[0]"
-            Invoke-WebRequest -Uri $candidateUrls[0] -OutFile $ADInstallerPath -UseBasicParsing -ErrorAction Stop
-            Write-Host "Downloaded to $ADInstallerPath"
-            $downloaded = $true
+            Invoke-WebRequest -Uri $msiUrl -OutFile $installerPath -UseBasicParsing
+            Write-Host "Download completed successfully"
         } catch {
-            Write-Error "CRITICAL: Download failed for AnyDesk: $($_.Exception.Message)"
+            Write-Error "Failed to download AnyDesk MSI: $($_.Exception.Message)"
             exit 1
         }
 
-        # بدء التثبيت الكامل الصامت
-        Write-Host "--- Starting Full Silent Installation of AnyDesk ---"
-        # نستخدم `--install` لضمان تثبيت خدمة AnyDesk في مسار Program Files
-        Start-Process -FilePath $ADInstallerPath -ArgumentList "--install" -Wait -PassThru | Out-Null
-        Start-Sleep -Seconds 15 # منح وقت لتسجيل الخدمة
+        Write-Host "Installing AnyDesk using MSI..."
+        $process = Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart", "/L*V", "`"$env:TEMP\anydesk_install.log`"" -PassThru -Wait
+        $exitCode = $process.ExitCode
         
-        # البحث عن AnyDesk.exe وإضافة المسار لمتغير بيئة مؤقت للاستخدام في الخطوات التالية
-        $PFx86 = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion' -Name 'ProgramFilesDir (x86)' -ErrorAction SilentlyContinue
+        # قراءة سجل التثبيت للتحقق
+        if (Test-Path "$env:TEMP\anydesk_install.log") {
+            $logContent = Get-Content "$env:TEMP\anydesk_install.log" -Tail 20
+            Write-Host "Last 20 lines of install log:"
+            $logContent | ForEach-Object { Write-Host $_ }
+        }
         
-        $possiblePaths = @(
-            "$env:ProgramFiles\AnyDesk\AnyDesk.exe",
-            "$PFx86\AnyDesk\AnyDesk.exe"
-        )
-        
+        if ($exitCode -ne 0) {
+            Write-Warning "MSI installation exited with code: $exitCode"
+            # نحاول المتابعة رغم ذلك لأن AnyDesk قد يكون مثبتًا
+        }
+
+        # تنظيف ملف التثبيت
+        Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
+
+        # البحث عن AnyDesk.exe مع محاولات متعددة
         $ADExePath = $null
-        foreach ($p in $possiblePaths) {
-            if (Test-Path $p) {
-                $ADExePath = $p
-                break
+        $maxAttempts = 10
+        for ($i = 1; $i -le $maxAttempts; $i++) {
+            Write-Host "Attempt $i to find AnyDesk.exe..."
+            
+            $possiblePaths = @(
+                "$env:ProgramFiles\AnyDesk\AnyDesk.exe"
+                "${env:ProgramFiles(x86)}\AnyDesk\AnyDesk.exe"
+                "$env:ProgramFiles\AnyDeskMSI\AnyDesk.exe"
+            )
+            
+            foreach ($path in $possiblePaths) {
+                if (Test-Path $path) {
+                    $ADExePath = $path
+                    Write-Host "Found AnyDesk at: $ADExePath"
+                    break
+                }
             }
+            
+            if ($ADExePath) { break }
+            
+            # إذا لم نجده، ننتظر ثم نحاول مرة أخرى
+            Start-Sleep -Seconds 10
         }
 
         if (-not $ADExePath) {
-            Write-Error "CRITICAL: AnyDesk.exe not found after installation. Full Install failed."
-            # نعلن أن AnyDesk غير متاح، لكن نستمر للسماح بـ RDP/Tailscale
-            echo "ANYDESK_PATH=NOT_INSTALLED" | Out-File -FilePath $env:GITHUB_ENV -Append
-            exit 0
+            Write-Error "AnyDesk.exe not found after $maxAttempts attempts. Checking installed programs..."
+            # عرض البرامج المثبتة للمساعدة في التشخيص
+            Get-WmiObject -Class Win32_Product | Select-Object Name, Version | Format-Table
+            exit 1
         }
-        
-        Write-Host "AnyDesk executable found at: $ADExePath"
-        echo "ANYDESK_PATH=$ADExePath" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-        # تعيين كلمة المرور
-        Write-Host "--- Setting Unattended Access Password ---"
-        try {
-            & "$ADExePath" --set-password $env:ANYDESK_PASS
+        # الانتظار لضمان تشغيل الخدمة
+        Write-Host "Waiting for AnyDesk service to start..."
+        Start-Sleep -Seconds 15
+
+        # محاولة ضبط كلمة المرور
+        $passwordSet = $false
+        for ($i = 1; $i -le 5; $i++) {
+            try {
+                Write-Host "Attempt $i to set AnyDesk password..."
+                & "$ADExePath" --set-password="$env:ANYDESK_PASS"
+                if ($LASTEXITCODE -eq 0) {
+                    $passwordSet = $true
+                    Write-Host "Password set successfully"
+                    break
+                }
+            } catch {
+                Write-Warning "Failed to set password on attempt $i: $($_.Exception.Message)"
+            }
             Start-Sleep -Seconds 5
-        } catch {
-            Write-Warning "Failed to set AnyDesk password via CLI: $($_.Exception.Message). Continuing."
         }
-        
+
+        if (-not $passwordSet) {
+            Write-Warning "Failed to set AnyDesk password via CLI. Continuing anyway..."
+        }
+
+        # الحصول على AnyDesk ID
+        $ADID = $null
+        $maxIdAttempts = 10
+        for ($i = 1; $i -le $maxIdAttempts; $i++) {
+            try {
+                Write-Host "Attempt $i to get AnyDesk ID..."
+                $rawId = & "$ADExePath" --get-id
+                if ($rawId -and $rawId.Trim()) {
+                    if ($rawId -match '\d{6,12}') {
+                        $ADID = $Matches[0].Trim()
+                    } else {
+                        $ADID = $rawId.Trim()
+                    }
+                    Write-Host "Retrieved AnyDesk ID: $ADID"
+                    break
+                }
+            } catch {
+                Write-Warning "Failed to get ID on attempt $i: $($_.Exception.Message)"
+            }
+            Start-Sleep -Seconds 5
+        }
+
+        if (-not $ADID) {
+            Write-Error "Could not retrieve AnyDesk ID after $maxIdAttempts attempts"
+            exit 1
+        }
+
+        echo "ANYDESK_ID=$ADID" | Out-File -FilePath $env:GITHUB_ENV -Append
+        Write-Host "AnyDesk configuration completed successfully"
+
       shell: powershell
 
-    # 7. تكوين RDP و إنشاء المستخدم
     - name: Configure RDP User and Set Password
       run: |
         $password = $env:RDP_PASS
@@ -145,73 +201,23 @@ jobs:
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
         Restart-Service -Name TermService -Force
       shell: powershell
-      
-    # 8. **الحصول على ID (الخطوة المؤجلة والمستقلة)**
-    - name: Retrieve AnyDesk ID (Deferred & Non-Failing)
-      run: |
-        $ADExePath = $env:ANYDESK_PATH
-        
-        # التحقق مما إذا كان AnyDesk قد تم تثبيته بنجاح في الخطوة السابقة
-        if ($ADExePath -eq "NOT_INSTALLED") {
-             Write-Host "WARNING: AnyDesk installation failed previously. Skipping ID retrieval."
-             echo "ANYDESK_ID=NOT_AVAILABLE" | Out-File -FilePath $env:GITHUB_ENV -Append
-             exit 0
-        }
 
-        # محاولة استخراج ID (ننتظر 200 ثانية لضمان استقرار الشبكة)
-        Write-Host "--- Attempting to retrieve AnyDesk ID (Max 200s Wait) ---"
-        $ADID = $null
-        $retries = 0
-        while (-not $ADID -and $retries -lt 40) {
-            try {
-                $IDRaw = (& "$ADExePath" --get-id | Out-String).Trim()
-                if ($IDRaw -match '\d{9,10}') {
-                    $ADID = ($IDRaw -match '\d{9,10}').Value
-                } else {
-                    $ADID = $null
-                }
-            } catch {
-                # نتجاهل الأخطاء المؤقتة وننتظر
-            }
-            
-            if (-not $ADID) {
-                Write-Host "Retry $retries/40: AnyDesk ID not found. Waiting 5s..."
-                Start-Sleep -Seconds 5
-            } else {
-                Write-Host "SUCCESS: AnyDesk ID found: $ADID"
-                break
-            }
-            $retries++
-        }
-        
-        if (-not $ADID) {
-            Write-Host "WARNING: Could not retrieve AnyDesk ID after 40 attempts. Assuming network block."
-            echo "ANYDESK_ID=NOT_AVAILABLE" | Out-File -FilePath $env:GITHUB_ENV -Append
-        } else {
-            echo "ANYDESK_ID=$ADID" | Out-File -FilePath $env:GITHUB_ENV -Append
-        }
-        
-      shell: powershell
-
-    # 9. طباعة بيانات الاتصال
     - name: Display Connection Details
       run: |
         Write-Host "--------------------------------------------------------"
         Write-Host "          SHADOWHACKER-GOD: DUAL CONNECTION INFO         "
         Write-Host "--------------------------------------------------------"
-        Write-Host "   A. اتصال RDP عبر Tailscale (الحل المؤكد):"
+        Write-Host "   A. اتصال RDP عبر Tailscale (الأساسي):"
         Write-Host "      - المستخدم (User): $env:RDP_USER"
         Write-Host "      - كلمة مرور RDP (Password): ${{ secrets.RDP_PASSWORD }}"
         Write-Host "      - عنوان IP (IP/Address): $env:TAILSCALE_IP"
         Write-Host "--------------------------------------------------------"
-        Write-Host "   B. اتصال AnyDesk (الاحتياطي):"
+        Write-Host "   B. اتصال AnyDesk (الاحتياطي/المباشر):"
         Write-Host "      - مُعرِّف AnyDesk (ID): $env:ANYDESK_ID"
         Write-Host "      - كلمة مرور AnyDesk (Password): ${{ secrets.ANYDESK_PASSWORD }}"
-        Write-Host "      **ملاحظة: إذا كان ID هو 'NOT_AVAILABLE'، استخدم Tailscale فقط**"
         Write-Host "--------------------------------------------------------"
       shell: powershell
 
-    # 10. حلقة الحفظ والإغلاق (للحفظ الآمن قبل 5h 50m)
     - name: Keep Alive and Data Sync Loop (Safe Shutdown)
       run: |
         Start-Sleep -Seconds 21000
