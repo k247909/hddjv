@@ -1,4 +1,4 @@
-name: RDP
+name: AEON-RDP-TAILSCALE-ANYDESK
 
 on:
   schedule:
@@ -63,7 +63,6 @@ jobs:
 
     - name: Install and Configure AnyDesk (robust, non-blocking)
       run: |
-        # minimal helper functions
         function Invoke-Download {
             param($url, $outPath)
             try {
@@ -81,7 +80,7 @@ jobs:
         $msiUrl = "https://download.anydesk.com/AnyDesk.msi"
         $msiPath = Join-Path $tempDir "AnyDesk.msi"
 
-        # 1) Try MSI download & silent install with timeout
+        # Try MSI download & silent install with timeout
         $downloaded = Invoke-Download -url $msiUrl -outPath $msiPath
         $installed = $false
 
@@ -105,7 +104,7 @@ jobs:
             Write-Warning "MSI download failed; will try winget/choco as fallback."
         }
 
-        # 2) winget fallback
+        # winget fallback
         if (-not $installed) {
             try {
                 $winget = Get-Command winget -ErrorAction SilentlyContinue
@@ -123,7 +122,7 @@ jobs:
             }
         }
 
-        # 3) choco fallback
+        # choco fallback
         if (-not $installed) {
             try {
                 $choco = Get-Command choco -ErrorAction SilentlyContinue
@@ -146,10 +145,27 @@ jobs:
             exit 1
         }
 
-        # 4) Locate AnyDesk.exe
-        $possibleRoots = @("$env:ProgramFiles\AnyDesk", "$env:ProgramFiles (x86)\AnyDesk", $env:ProgramFiles, ${env:ProgramFiles(x86)})
+        # Locate AnyDesk.exe (expanded to include Chocolatey/Winget/LocalAppData paths)
         $ADExePath = $null
-        foreach ($root in $possibleRoots | Where-Object { $_ -ne $null }) {
+        $possibleRoots = @(
+            "$env:ProgramFiles\AnyDesk",
+            "$env:ProgramFiles (x86)\AnyDesk",
+            "C:\ProgramData\chocolatey\lib\anydesk.portable\tools",
+            "C:\ProgramData\chocolatey\lib\anydesk\tools",
+            "C:\ProgramData\chocolatey\lib\anydesk\tools\AnyDesk",
+            "C:\ProgramData\chocolatey\lib\anydesk.portable\tools",
+            "C:\ProgramData\chocolatey\lib\anydesk\tools",
+            "C:\ProgramData\chocolatey\lib",
+            "C:\ProgramData\chocolatey\bin",
+            "C:\ProgramData\chocolatey\lib\anydesk.portable\tools",
+            "C:\ProgramData\chocolatey\lib\anydesk\tools",
+            "C:\ProgramData\chocolatey\lib\anydesk.portable\tools",
+            "$env:LocalAppData\Programs\AnyDesk",
+            "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\AnyDesk"
+        )
+
+        foreach ($root in $possibleRoots | Select-Object -Unique) {
+            if (-not (Test-Path $root)) { continue }
             try {
                 $candidate = Join-Path $root "AnyDesk.exe"
                 if (Test-Path $candidate) { $ADExePath = $candidate; break }
@@ -159,15 +175,14 @@ jobs:
         }
 
         if (-not $ADExePath) {
-            Write-Error "AnyDesk.exe not found after install. Listing ProgramFiles folders for debug."
-            Get-ChildItem $env:ProgramFiles -Directory | Select-Object Name
-            Get-ChildItem ${env:ProgramFiles(x86)} -Directory -ErrorAction SilentlyContinue | Select-Object Name
+            Write-Error "AnyDesk.exe not found after install, even in extended paths."
+            Get-ChildItem "C:\ProgramData\chocolatey\lib" -Directory | Select-Object Name
             exit 1
         }
 
         Write-Host "Found AnyDesk at: $ADExePath"
 
-        # 5) Try to set unattended access password via CLI (best-effort)
+        # Try to set unattended access password via CLI (best-effort)
         try {
             Write-Host "Attempting to set AnyDesk password via CLI..."
             & "$ADExePath" --set-password $env:ANYDESK_PASS 2>&1 | Out-Null
@@ -176,7 +191,7 @@ jobs:
             Write-Warning "Setting AnyDesk password via CLI failed: $($_.Exception.Message)"
         }
 
-        # 6) Get AnyDesk ID with retries (best-effort)
+        # Get AnyDesk ID with retries (best-effort)
         $ADID = $null
         $retries = 0
         while (-not $ADID -and $retries -lt 12) {
