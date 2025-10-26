@@ -108,14 +108,15 @@ jobs:
             exit 1
         }
         
-        # التأكد من المسار التنفيذي
-        if (-not (Test-Path "$env:INSTALL_DIR\rustdesk.exe")) {
-             Write-Error "CRITICAL: RustDesk executable not found after installation attempt. Installation Failed."
+        # التأكد من المسار التنفيذي وتعيين متغير البيئة
+        $rustdeskExePath = "$env:INSTALL_DIR\rustdesk.exe"
+        if (-not (Test-Path $rustdeskExePath)) {
+             Write-Error "CRITICAL: RustDesk executable not found at $rustdeskExePath. Installation Failed."
              exit 1
         }
         
         # تحديد المسار التنفيذي لـ RustDesk و بدء الخدمة
-        echo "RUSTDESK_EXE=$env:INSTALL_DIR\rustdesk.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+        echo "RUSTDESK_EXE=$rustdeskExePath" | Out-File -FilePath $env:GITHUB_ENV -Append
         if ($foundService.Status -ne 'Running') {
              try { Start-Service -Name $foundService.Name -ErrorAction SilentlyContinue; Start-Sleep -Seconds 5 } catch {}
         }
@@ -123,17 +124,26 @@ jobs:
         Write-Host "RustDesk Installation Complete and Service is Running."
       shell: powershell
 
-    # 5. تكوين RustDesk (تعيين كلمة المرور الدائمة والحصول على الـ ID)
+    # 5. تكوين RustDesk (تعيين كلمة المرور الدائمة والحصول على الـ ID) - تم إضافة تحقق أولي
     - name: Configure RustDesk & Get ID
       run: |
         Write-Host "=== Configuring RustDesk Unattended Access ==="
+        
+        # === التحقق المضاف: لتجنب الخطأ InvokeMethodOnNull ===
         $rustdeskExe = $env:RUSTDESK_EXE
+        if (-not $rustdeskExe -or -not (Test-Path $rustdeskExe)) {
+            Write-Error "CRITICAL: RUSTDESK_EXE path is invalid or missing: $rustdeskExe. Cannot proceed with configuration."
+            exit 1
+        }
+        # === نهاية التحقق ===
+        
         $rdPass = $env:RUSTDESK_PASS
         
         # 5.1 تعيين كلمة المرور الدائمة (Unattended Password)
         Write-Host "Setting permanent password..."
         # يتم استخدام --password لتعيين كلمة المرور غير المراقبة
         & $rustdeskExe --password $rdPass
+        Write-Host "Done!"
         Start-Sleep -Seconds 5
 
         # 5.2 الحصول على الـ ID عبر سطر الأوامر (مع محاولة متكررة للـ ID)
@@ -141,7 +151,12 @@ jobs:
         $rdID = $null
         $retries = 0
         while (-not $rdID -and $retries -lt 10) {
-            $rdID = (& $rustdeskExe --get-id).Trim()
+            # Trim() يُستخدم فقط إذا كان هناك ناتج غير فارغ
+            $output = & $rustdeskExe --get-id
+            if ($output) {
+              $rdID = $output.Trim()
+            }
+            
             if (-not $rdID -or $rdID -notmatch '^\d{9}$') {
                 $rdID = $null # إعادة التعيين إذا كانت القيمة غير صالحة
                 Start-Sleep -Seconds 5
