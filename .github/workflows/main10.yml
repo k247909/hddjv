@@ -150,17 +150,15 @@ jobs:
             Write-Host "Service final status: $(Get-Service -Name $foundSvc.Name | Select-Object -ExpandProperty Status)"
         }
 
-    # 7. تعيين ID الثابت وكلمة المرور والتحقق
-    - name: Set Static ID and Verify Configuration
+    # 7. تعيين ID الثابت وكلمة المرور والتحقق (مع إعادة المحاولة)
+    - name: Set Static ID and Verify Configuration (with Retries)
       shell: pwsh
       run: |
-        Write-Host "=== Configuring Static ID and Verifying Configuration ==="
+        Write-Host "=== Configuring Static ID and Verifying Configuration (with Retries) ==="
         $exe = $env:RUSTDESK_EXE
         $pass = $env:RUSTDESK_PASS
         $staticId = $env:RUSTDESK_STATIC_ID
         $persistDir = $env:PERSISTENT_DIR
-        
-        # مسارات الملفات والمجلدات الحساسة
         $configDir = "C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config"
         $serviceConfigPath = Join-Path $configDir "RustDesk.toml"
 
@@ -168,76 +166,90 @@ jobs:
             Write-Error "CRITICAL: RUSTDESK_STATIC_ID secret is missing. Cannot set static ID."
             exit 1
         }
-        
-        # 1) تعيين كلمة المرور عبر CLI أولاً (يضمن وجود المجلدات)
-        Write-Host "Setting permanent password (CLI)..."
-        & $exe --password $pass 2>&1 | Write-Host
-        Start-Sleep -Seconds 5
-        
-        # 2) التأكد من وجود مجلد الإعدادات
-        if (-not (Test-Path $configDir)) {
-            Write-Host "Config directory not found. Trying to create it."
-            mkdir $configDir -Force
-        }
-        
-        # 3) إنشاء الملف إذا لم يكن موجوداً بمحتوى أساسي
-        if (-not (Test-Path $serviceConfigPath)) {
-            Write-Host "TOML config file not found. Creating a minimal file."
-            @("[options]", "id = '0'", "password = ''") | Out-File -FilePath $serviceConfigPath -Encoding UTF8 -Force
-            Start-Sleep -Seconds 2
-        }
 
-        # 4) تعديل ملف TOML لتعيين ID الثابت
-        Write-Host "Found TOML config. Attempting to set static id = '$staticId'."
-        $content = Get-Content -Path $serviceConfigPath -Raw -ErrorAction SilentlyContinue
-        $newContent = $content
-        $idRegex = "id\s*=\s*'.*?'"
-        
-        # استبدال ID القديم بالثابت الجديد
-        $newContent = $newContent -replace $idRegex, "id = '$staticId'"
-        
-        # في حال عدم وجود id في الملف، نضيفه.
-        if ($newContent -eq $content) {
-             Write-Host "ID not found for replacement. Appending ID..."
-             $newContent += "`nid = '$staticId'"
-        }
-        
-        # الكتابة فوق الملف
-        $newContent | Out-File -FilePath $serviceConfigPath -Encoding UTF8 -Force
-        
-        Write-Host "Restarting service to load Static ID..."
-        try { Stop-Service -Name RustDesk -ErrorAction SilentlyContinue } catch {}
-        Start-Sleep -Seconds 5
-        try { Start-Service -Name RustDesk -ErrorAction SilentlyContinue } catch {}
-        Start-Sleep -Seconds 10
-        
-        # 5) التحقق من تطبيق ID
-        Write-Host "Verifying static ID in config file..."
-        $attempts = 0
-        $maxAttempts = 12 # 1 minute max wait for verification
-        $verifiedId = $null
+        $maxRetries = 3
+        $currentAttempt = 1
+        $verificationSuccess = $false
 
-        while (-not $verifiedId -and $attempts -lt $maxAttempts) {
-            $currentContent = Get-Content -Path $serviceConfigPath -Raw -ErrorAction SilentlyContinue
-            if ($currentContent -match "id\s*=\s*'(\d{6,12})'") {
-                $checkId = $Matches[1].Trim()
-                if ($checkId -eq $staticId) {
-                    $verifiedId = $staticId
-                    Write-Host "✅ Verification successful: Config file now shows ID [$verifiedId]."
-                    break
-                }
-            }
+        while ($currentAttempt -le $maxRetries) {
+            Write-Host "--- Attempt $currentAttempt/$maxRetries to set and verify Static ID ---"
+
+            # 1) إيقاف الخدمة لضمان تعديل الملف
+            Write-Host "Stopping service..."
+            try { Stop-Service -Name RustDesk -ErrorAction SilentlyContinue } catch {}
             Start-Sleep -Seconds 5
-            $attempts++
-            Write-Host "Verification attempt $attempts/$maxAttempts: ID is currently $checkId..."
+            
+            # 2) تعيين كلمة المرور عبر CLI (يضمن وجود المجلدات)
+            Write-Host "Setting permanent password (CLI)..."
+            & $exe --password $pass 2>&1 | Write-Host
+            Start-Sleep -Seconds 5
+            
+            # 3) التأكد من وجود مجلد الإعدادات
+            if (-not (Test-Path $configDir)) {
+                Write-Host "Config directory not found. Trying to create it."
+                mkdir $configDir -Force
+            }
+            
+            # 4) إنشاء الملف إذا لم يكن موجوداً
+            if (-not (Test-Path $serviceConfigPath)) {
+                Write-Host "TOML config file not found. Creating a minimal file."
+                @("[options]", "id = '0'", "password = ''") | Out-File -FilePath $serviceConfigPath -Encoding UTF8 -Force
+                Start-Sleep -Seconds 2
+            }
+
+            # 5) تعديل ملف TOML لتعيين ID الثابت
+            Write-Host "Attempting to set static id = '$staticId' in TOML."
+            $content = Get-Content -Path $serviceConfigPath -Raw -ErrorAction SilentlyContinue
+            $newContent = $content
+            $idRegex = "id\s*=\s*'.*?'"
+            
+            # استبدال ID القديم بالثابت الجديد
+            $newContent = $newContent -replace $idRegex, "id = '$staticId'"
+            
+            # الكتابة فوق الملف
+            $newContent | Out-File -FilePath $serviceConfigPath -Encoding UTF8 -Force
+            
+            # 6) إعادة تشغيل الخدمة لتحميل ID الثابت
+            Write-Host "Restarting service to load Static ID..."
+            try { Start-Service -Name RustDesk -ErrorAction SilentlyContinue } catch {}
+            Start-Sleep -Seconds 15 
+            
+            # 7) التحقق من تطبيق ID
+            Write-Host "Verifying static ID in config file after restart..."
+            $checkWaitAttempts = 12 # 1 minute wait
+            $currentCheckAttempt = 0
+            $verifiedId = $null
+
+            while ($currentCheckAttempt -lt $checkWaitAttempts) {
+                $currentContent = Get-Content -Path $serviceConfigPath -Raw -ErrorAction SilentlyContinue
+                if ($currentContent -match "id\s*=\s*'(\d{6,12})'") {
+                    $checkId = $Matches[1].Trim()
+                    if ($checkId -eq $staticId) {
+                        $verifiedId = $staticId
+                        Write-Host "✅ Verification successful: Config file now shows ID [$verifiedId]."
+                        $verificationSuccess = $true
+                        break
+                    }
+                }
+                Start-Sleep -Seconds 5
+                $currentCheckAttempt++
+            }
+            
+            if ($verificationSuccess) {
+                break # الخروج من حلقة المحاولة الرئيسية
+            }
+
+            Write-Warning "Verification failed on attempt $currentAttempt. ID found: $checkId. Retrying in 10 seconds..."
+            $currentAttempt++
+            Start-Sleep -Seconds 10 
         }
-        
-        if (-not $verifiedId) {
-            Write-Error "CRITICAL: Static ID [$staticId] was NOT verified in RustDesk.toml. Connection will fail."
+
+        if (-not $verificationSuccess) {
+            Write-Error "CRITICAL: Static ID [$staticId] failed to set and verify after $maxRetries attempts."
             exit 1
         }
         
-        # 6) حفظ ID الثابت في المتغيرات
+        # 8) حفظ ID الثابت في المتغيرات
         echo "RUSTDESK_ID=$staticId" | Out-File -FilePath $env:GITHUB_ENV -Append
         "$staticId" | Out-File -FilePath (Join-Path $persistDir "rustdesk_id.txt") -Force
 
