@@ -1,5 +1,5 @@
 # .github/workflows/aeon-rustdesk.yml
-name: RUSTDESK-TAILSCALE
+name: AEON-RDP-RUSTDESK-TAILSCALE
 
 on:
   workflow_dispatch:
@@ -20,7 +20,6 @@ jobs:
       shell: powershell
       run: |
         Write-Host "--- Loading Environment Variables and Secrets ---"
-        # تأكد من أن هذه الأسرار محددة لديك
         echo "RUSTDESK_PASS=${{ secrets.RUSTDESK_PASSWORD }}" | Out-File -FilePath $env:GITHUB_ENV -Append
         echo "RUSTDESK_STATIC_ID=${{ secrets.RUSTDESK_STATIC_ID }}" | Out-File -FilePath $env:GITHUB_ENV -Append
         echo "PERSISTENT_DIR=C:\Users\runneradmin\PersistentData" | Out-File -FilePath $env:GITHUB_ENV -Append
@@ -120,7 +119,7 @@ jobs:
         echo "RUSTDESK_EXE=$rustdeskExe" | Out-File -FilePath $env:GITHUB_ENV -Append
         Write-Host "Detected rustdesk.exe at: $rustdeskExe"
 
-    # 6. التأكد من تشغيل الخدمة (ضمان إنشاء المجلدات)
+    # 6. التأكد من تشغيل الخدمة
     - name: Ensure RustDesk service installed & running
       shell: pwsh
       run: |
@@ -151,11 +150,11 @@ jobs:
             Write-Host "Service final status: $(Get-Service -Name $foundSvc.Name | Select-Object -ExpandProperty Status)"
         }
 
-    # 7. تعيين ID الثابت وكلمة المرور (تمت زيادة الثبات)
-    - name: Set Static ID and Permanent Password
+    # 7. تعيين ID الثابت وكلمة المرور والتحقق
+    - name: Set Static ID and Verify Configuration
       shell: pwsh
       run: |
-        Write-Host "=== Configuring Static ID and Permanent Password ==="
+        Write-Host "=== Configuring Static ID and Verifying Configuration ==="
         $exe = $env:RUSTDESK_EXE
         $pass = $env:RUSTDESK_PASS
         $staticId = $env:RUSTDESK_STATIC_ID
@@ -170,7 +169,7 @@ jobs:
             exit 1
         }
         
-        # 1) تعيين كلمة المرور عبر CLI (يجب أن يتم أولاً لضمان وجود المجلدات)
+        # 1) تعيين كلمة المرور عبر CLI أولاً (يضمن وجود المجلدات)
         Write-Host "Setting permanent password (CLI)..."
         & $exe --password $pass 2>&1 | Write-Host
         Start-Sleep -Seconds 5
@@ -189,11 +188,13 @@ jobs:
         }
 
         # 4) تعديل ملف TOML لتعيين ID الثابت
-        Write-Host "Found TOML config. Setting static id = '$staticId'."
+        Write-Host "Found TOML config. Attempting to set static id = '$staticId'."
         $content = Get-Content -Path $serviceConfigPath -Raw -ErrorAction SilentlyContinue
+        $newContent = $content
+        $idRegex = "id\s*=\s*'.*?'"
         
-        # تعديل قيمة id إلى القيمة الثابتة (باستخدام القيمة الثابتة مباشرة)
-        $newContent = $content -replace "id\s*=\s*'.*?'", "id = '$staticId'"
+        # استبدال ID القديم بالثابت الجديد
+        $newContent = $newContent -replace $idRegex, "id = '$staticId'"
         
         # في حال عدم وجود id في الملف، نضيفه.
         if ($newContent -eq $content) {
@@ -210,11 +211,37 @@ jobs:
         try { Start-Service -Name RustDesk -ErrorAction SilentlyContinue } catch {}
         Start-Sleep -Seconds 10
         
-        # 5) حفظ ID الثابت في المتغيرات
+        # 5) التحقق من تطبيق ID
+        Write-Host "Verifying static ID in config file..."
+        $attempts = 0
+        $maxAttempts = 12 # 1 minute max wait for verification
+        $verifiedId = $null
+
+        while (-not $verifiedId -and $attempts -lt $maxAttempts) {
+            $currentContent = Get-Content -Path $serviceConfigPath -Raw -ErrorAction SilentlyContinue
+            if ($currentContent -match "id\s*=\s*'(\d{6,12})'") {
+                $checkId = $Matches[1].Trim()
+                if ($checkId -eq $staticId) {
+                    $verifiedId = $staticId
+                    Write-Host "✅ Verification successful: Config file now shows ID [$verifiedId]."
+                    break
+                }
+            }
+            Start-Sleep -Seconds 5
+            $attempts++
+            Write-Host "Verification attempt $attempts/$maxAttempts: ID is currently $checkId..."
+        }
+        
+        if (-not $verifiedId) {
+            Write-Error "CRITICAL: Static ID [$staticId] was NOT verified in RustDesk.toml. Connection will fail."
+            exit 1
+        }
+        
+        # 6) حفظ ID الثابت في المتغيرات
         echo "RUSTDESK_ID=$staticId" | Out-File -FilePath $env:GITHUB_ENV -Append
         "$staticId" | Out-File -FilePath (Join-Path $persistDir "rustdesk_id.txt") -Force
 
-        Write-Host "✅ RustDesk Static ID set: $staticId"
+        Write-Host "✅ RustDesk Static ID successfully set and verified: $staticId"
 
     # 8. طباعة بيانات الاتصال
     - name: Display connection details
