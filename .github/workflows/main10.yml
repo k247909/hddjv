@@ -82,7 +82,7 @@ jobs:
       run: |
         Write-Host "=== Ensuring RustDesk service is installed and running ==="
         $exe = $env:RUSTDESK_EXE
-        if (-not (Test-Path $exe)) { Write-Error "rustdesk.exe missing: $exe"; exit 1 }
+        if (-not (Test-Path $exe)) { Write-Error "rustdesk.exe missing: $exe"; exit 1 } # فحص مكرر لضمان الثبات
 
         # محاولة تثبيت وتشغيل الخدمة
         Write-Host "Attempting to install service..."
@@ -123,6 +123,11 @@ jobs:
             Write-Error "CRITICAL: RUSTDESK_STATIC_ID secret is missing. Cannot set static ID."
             exit 1
         }
+        if (-not (Test-Path $exe)) {
+             Write-Error "CRITICAL: RustDesk executable not found at $exe. Cannot proceed with configuration."
+             exit 1
+        }
+
 
         $maxRetries = 3
         $currentAttempt = 1
@@ -130,15 +135,16 @@ jobs:
 
         while ($currentAttempt -le $maxRetries) {
             Write-Host "--- Attempt $currentAttempt/$maxRetries to set and verify Static ID ---"
-
+            
             # 1) إيقاف الخدمة لضمان تعديل الملف
             Write-Host "Stopping service..."
             try { Stop-Service -Name RustDesk -ErrorAction SilentlyContinue } catch {}
             Start-Sleep -Seconds 5
             
-            # 2) تعيين كلمة المرور عبر CLI (يضمن وجود المجلدات)
-            Write-Host "Setting permanent password (CLI)..."
+            # 2) تعيين كلمة المرور عبر CLI
+            Write-Host "Setting permanent password (CLI) to value: ***"
             & $exe --password $pass 2>&1 | Write-Host
+            Write-Host "Password set command executed successfully."
             Start-Sleep -Seconds 5
             
             # 3) التأكد من وجود مجلد الإعدادات
@@ -176,17 +182,21 @@ jobs:
             $checkWaitAttempts = 12 # 1 minute wait
             $currentCheckAttempt = 0
             $verifiedId = $null
-            $checkId = "N/A" # تهيئة للمرة الأولى
+            $checkId = "N/A (File Not Found)"
 
             while ($currentCheckAttempt -lt $checkWaitAttempts) {
-                $currentContent = Get-Content -Path $serviceConfigPath -Raw -ErrorAction SilentlyContinue
-                if ($currentContent -match "id\s*=\s*'(\d{6,12})'") {
-                    $checkId = $Matches[1].Trim()
-                    if ($checkId -eq $staticId) {
-                        $verifiedId = $staticId
-                        Write-Host "✅ Verification successful: Config file now shows ID [$verifiedId]."
-                        $verificationSuccess = $true
-                        break
+                if (Test-Path $serviceConfigPath) {
+                    $currentContent = Get-Content -Path $serviceConfigPath -Raw -ErrorAction SilentlyContinue
+                    if ($currentContent -match "id\s*=\s*'(\d{6,12})'") {
+                        $checkId = $Matches[1].Trim()
+                        if ($checkId -eq $staticId) {
+                            $verifiedId = $staticId
+                            Write-Host "✅ Verification successful: Config file now shows ID [$verifiedId]."
+                            $verificationSuccess = $true
+                            break
+                        }
+                    } else {
+                       $checkId = "ID not matched or found in file."
                     }
                 }
                 Start-Sleep -Seconds 5
@@ -197,7 +207,7 @@ jobs:
                 break # الخروج من حلقة المحاولة الرئيسية
             }
 
-            Write-Warning "Verification failed on attempt $currentAttempt. ID found: $checkId. Retrying in 10 seconds..."
+            Write-Warning "Verification failed on attempt $currentAttempt. Expected ID: [$staticId], Found ID: [$checkId]. Retrying in 10 seconds..."
             $currentAttempt++
             Start-Sleep -Seconds 10 
         }
